@@ -52,8 +52,7 @@ def load_credentials(settings: GoogleDriveSettings) -> service_account.Credentia
             )
         except (OSError, ValueError) as exc:
             raise CredentialLoadError(
-                "não foi possível carregar GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE "
-                f"({type(exc).__name__})"
+                "não foi possível carregar o arquivo indicado por GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
             ) from exc
 
     return None

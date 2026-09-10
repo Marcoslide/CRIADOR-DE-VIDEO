@@ -3,6 +3,11 @@
 - GET /health        liveness: o processo da API está de pé.
 - GET /health/ready   readiness: Postgres e Redis respondem agora.
 - GET /health/worker  round-trip real através do Celery (broker -> worker -> backend).
+
+Nenhum destes endpoints é autenticado — são públicos por design (health probes). Por isso
+a exceção completa (que pode conter host, porta, DSN ou caminho de arquivo) nunca sai daqui:
+vai só para o log estruturado via `dhf_shared.logging`; a resposta HTTP leva apenas o
+`error_code`/mensagem sanitizados de `dhf_shared.errors.sanitize_error`.
 """
 
 import time
@@ -13,11 +18,14 @@ from dhf_schemas.health import ComponentCheck, HealthResponse, ReadinessResponse
 from dhf_shared.celery_app import ping as celery_ping
 from dhf_shared.config import get_settings
 from dhf_shared.db import get_engine
+from dhf_shared.errors import sanitize_error
+from dhf_shared.logging import get_logger
 from fastapi import APIRouter
 from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(tags=["health"])
+_logger = get_logger(service="api", component="health")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -49,12 +57,16 @@ async def worker_health() -> ComponentCheck:
             latency_ms=_elapsed_ms(start),
             detail=str(payload),
         )
-    except Exception as exc:  # noqa: BLE001 - reportado ao cliente, não engolido
+    except Exception as exc:  # noqa: BLE001 - logado completo, exposto só sanitizado
+        _logger.error("health.worker_check_failed", error=str(exc), error_type=type(exc).__name__)
+        sanitized = sanitize_error(exc)
+        status = "timeout" if sanitized.code == "timeout" else "error"
         return ComponentCheck(
             name="celery_worker",
-            status="timeout" if "time" in str(exc).lower() else "error",
+            status=status,
             latency_ms=_elapsed_ms(start),
-            detail=str(exc),
+            detail=sanitized.message,
+            error_code=sanitized.code,
         )
 
 
@@ -66,8 +78,14 @@ async def _check_postgres() -> ComponentCheck:
             await conn.execute(text("SELECT 1"))
         return ComponentCheck(name="postgres", status="connected", latency_ms=_elapsed_ms(start))
     except Exception as exc:  # noqa: BLE001
+        _logger.error("health.postgres_check_failed", error=str(exc), error_type=type(exc).__name__)
+        sanitized = sanitize_error(exc)
         return ComponentCheck(
-            name="postgres", status="error", latency_ms=_elapsed_ms(start), detail=str(exc)
+            name="postgres",
+            status="error",
+            latency_ms=_elapsed_ms(start),
+            detail=sanitized.message,
+            error_code=sanitized.code,
         )
 
 
@@ -79,8 +97,14 @@ async def _check_redis() -> ComponentCheck:
         await client.ping()
         return ComponentCheck(name="redis", status="connected", latency_ms=_elapsed_ms(start))
     except Exception as exc:  # noqa: BLE001
+        _logger.error("health.redis_check_failed", error=str(exc), error_type=type(exc).__name__)
+        sanitized = sanitize_error(exc)
         return ComponentCheck(
-            name="redis", status="error", latency_ms=_elapsed_ms(start), detail=str(exc)
+            name="redis",
+            status="error",
+            latency_ms=_elapsed_ms(start),
+            detail=sanitized.message,
+            error_code=sanitized.code,
         )
     finally:
         await client.aclose()

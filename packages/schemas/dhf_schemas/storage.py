@@ -33,7 +33,11 @@ class TreeValidationResult(BaseModel):
 
 class StorageStatus(BaseModel):
     status: StorageConnectionStatus
+    # Mensagem sanitizada (dhf_shared.errors.sanitize_error) nos casos ERROR — nunca
+    # str(exc) cru, URL interna ou hostname. Nos casos NOT_CONFIGURED/DEGRADED o detail é
+    # texto fixo escrito à mão (não deriva de exceção), então é seguro por construção.
     detail: str | None = None
+    error_code: str | None = None
     root_folder_id: str | None = None
     tree: TreeValidationResult | None = None
     checked_at: datetime

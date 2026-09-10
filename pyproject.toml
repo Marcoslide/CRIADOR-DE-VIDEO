@@ -41,4 +41,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: testes reais contra serviços externos (skip automático sem credencial)",
+    "requires_services: precisa de Postgres/Redis/worker reais rodando (não é unitário)",
 ]

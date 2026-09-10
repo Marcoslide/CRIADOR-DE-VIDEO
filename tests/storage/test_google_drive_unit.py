@@ -79,10 +79,16 @@ async def test_get_status_degraded_when_folder_missing(provider) -> None:
 
 @respx.mock
 async def test_get_status_error_when_api_fails(provider) -> None:
+    """Também prova a sanitização: mesmo depois de with_retry embrulhar o erro em
+    RetryExhaustedError, o detail exposto é a mensagem genérica — nunca a URL real da
+    Drive API nem o corpo/erro cru da resposta."""
     respx.get(FILES_URL).mock(return_value=httpx.Response(500, json={"error": "boom"}))
     status = await provider.get_status(force_refresh=True)
     assert status.status == StorageConnectionStatus.ERROR
-    assert status.detail is not None
+    assert status.error_code == "upstream_error"
+    assert status.detail == "O serviço externo respondeu com erro."
+    assert FILES_URL not in status.detail
+    assert "boom" not in status.detail
 
 
 async def test_get_status_connecting_when_refresh_already_in_progress(provider) -> None:

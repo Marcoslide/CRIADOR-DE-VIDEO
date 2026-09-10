@@ -11,6 +11,8 @@ import httpx
 import pytest
 from app.main import app
 
+pytestmark = pytest.mark.requires_services
+
 
 @pytest.fixture
 async def client() -> AsyncIterator[httpx.AsyncClient]:
@@ -45,19 +47,44 @@ async def test_readiness_reports_real_failure_when_redis_is_down(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Garante que a rota nunca finge sucesso: aponta o Redis para uma porta inexistente
-    e confirma que o check correspondente reporta erro real (regra ZERO FAKE)."""
+    e confirma que o check correspondente reporta erro real (regra ZERO FAKE) — e que o
+    detail é sanitizado, nunca a exceção crua com host/porta internos."""
     from dhf_shared.config import Settings, get_settings
 
-    broken = Settings(redis_host="localhost", redis_port=1)
+    broken_host, broken_port = "localhost", 1
+    broken = Settings(redis_host=broken_host, redis_port=broken_port)
     monkeypatch.setattr("app.routers.health.get_settings", lambda: broken)
 
     response = await client.get("/health/ready")
     body = response.json()
 
     checks_by_name = {check["name"]: check for check in body["checks"]}
-    assert checks_by_name["redis"]["status"] == "error"
-    assert checks_by_name["redis"]["detail"]
+    redis_check = checks_by_name["redis"]
+    assert redis_check["status"] == "error"
+    assert redis_check["error_code"] == "connection_error"
+    assert redis_check["detail"] == "Não foi possível conectar ao serviço."
+    assert broken_host not in redis_check["detail"]
+    assert str(broken_port) not in redis_check["detail"]
     assert body["ready"] is False
+
+    get_settings.cache_clear()
+
+
+async def test_readiness_logs_full_error_internally_even_though_response_is_sanitized(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """O detalhe sanitizado sai da resposta, mas o erro completo (incluindo host/porta)
+    precisa continuar disponível para quem opera o sistema — via log estruturado."""
+    from dhf_shared.config import Settings, get_settings
+
+    broken_host, broken_port = "localhost", 1
+    broken = Settings(redis_host=broken_host, redis_port=broken_port)
+    monkeypatch.setattr("app.routers.health.get_settings", lambda: broken)
+
+    await client.get("/health/ready")
+    logged = capsys.readouterr().out
+    assert broken_host in logged
+    assert "health.redis_check_failed" in logged
 
     get_settings.cache_clear()
 

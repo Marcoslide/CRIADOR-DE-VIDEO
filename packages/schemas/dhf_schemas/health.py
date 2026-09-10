@@ -16,7 +16,10 @@ class ComponentCheck(BaseModel):
     name: str
     status: ComponentStatus
     latency_ms: float | None = None
+    # Mensagem sanitizada (dhf_shared.errors.sanitize_error) — nunca str(exc) cru, nunca
+    # host/porta/caminho de infraestrutura. O erro completo vai só para o log interno.
     detail: str | None = None
+    error_code: str | None = None
 
 
 class HealthResponse(BaseModel):

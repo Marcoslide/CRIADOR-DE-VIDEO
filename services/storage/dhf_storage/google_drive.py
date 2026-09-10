@@ -29,12 +29,14 @@ from dhf_schemas.storage import (
     SyncReport,
     TreeValidationResult,
 )
+from dhf_shared.errors import sanitize_error
 from dhf_shared.logging import get_logger
 
 from dhf_storage import drive_api
 from dhf_storage.auth import CredentialLoadError, ensure_fresh_token, load_credentials
 from dhf_storage.cache import FolderIdCache
 from dhf_storage.config import GoogleDriveSettings, get_google_drive_settings
+from dhf_storage.retry import RetryExhaustedError
 from dhf_storage.tree import (
     OFFICIAL_TOP_LEVEL_FOLDERS,
     SCRATCH_PREFIX,
@@ -43,6 +45,13 @@ from dhf_storage.tree import (
 )
 
 _UPLOAD_MIME_DEFAULT = "application/octet-stream"
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """`with_retry` embrulha o último erro em RetryExhaustedError quando esgota as
+    tentativas — sanitize_error precisa do erro ORIGINAL (httpx.HTTPStatusError etc.) para
+    classificar direito, não do wrapper genérico."""
+    return exc.last_error if isinstance(exc, RetryExhaustedError) else exc
 
 
 class GoogleDriveStorageProvider:
@@ -251,11 +260,15 @@ class GoogleDriveStorageProvider:
                 children = await drive_api.list_children(
                     client, token, root_id, folders_only=True, **self._retry_kwargs()
                 )
-            except Exception as exc:  # noqa: BLE001 - reportado como ERROR, nunca engolido
-                self._logger.error("storage.status_check_failed", error=str(exc))
+            except Exception as exc:  # noqa: BLE001 - logado completo, exposto só sanitizado
+                self._logger.error(
+                    "storage.status_check_failed", error=str(exc), error_type=type(exc).__name__
+                )
+                sanitized = sanitize_error(_root_cause(exc))
                 status = StorageStatus(
                     status=StorageConnectionStatus.ERROR,
-                    detail=f"{type(exc).__name__}: {exc}",
+                    detail=sanitized.message,
+                    error_code=sanitized.code,
                     root_folder_id=root_id,
                     checked_at=now,
                 )

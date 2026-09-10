@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 
 from dhf_shared.config import get_settings
 from dhf_shared.logging import configure_logging, get_logger
+from dhf_storage.factory import get_storage_provider
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import health
+from app.routers import health, storage
 
 
 @asynccontextmanager
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger = get_logger(service="api")
     logger.info("api.startup", app_env=settings.app_env)
     yield
+    await get_storage_provider().aclose()
     logger.info("api.shutdown")
 
 
@@ -36,6 +38,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(health.router)
+    app.include_router(storage.router)
     return app
 
 

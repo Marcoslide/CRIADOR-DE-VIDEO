@@ -4,7 +4,8 @@ Trabalho **card por card** (seção 79 do prompt-mestre): cada fase abaixo vira 
 cards no Trello. Não avançamos para a fase N+1 sem a Definition of Done da fase N cumprida
 de verdade (seção 80) — nada é "concluído" só porque o código foi escrito.
 
-Status global: **FASE 1 em implementação.**
+Status global: **FASE 1 concluída · FASE 2 (Storage) com código completo, validação real
+com credencial pendente.**
 
 ---
 
@@ -16,7 +17,7 @@ Status global: **FASE 1 em implementação.**
 
 ---
 
-## FASE 1 — Foundation 🔵 EM ANDAMENTO
+## FASE 1 — Foundation ✅ CONCLUÍDA
 
 **Objetivo:** esqueleto do monorepo rodando de ponta a ponta (web → api → postgres/redis →
 worker), com health checks reais.
@@ -38,31 +39,53 @@ qualquer entidade de domínio (Avatar/Voice/Motion/Product/...), Director AI, en
 externas. Ver seções 6-10 deste documento.
 
 **Definition of Done da Fase 1:**
-- [ ] `docker compose up` sobe os 5 serviços sem erro;
-- [ ] `GET /health` responde 200 sempre que o processo API está de pé;
-- [ ] `GET /health/ready` retorna `postgres: connected` e `redis: connected` **reais** (não
+- [x] `docker compose up` sobe os 5 serviços sem erro — **exceto**: build das imagens não
+  pôde ser validado no sandbox de desenvolvimento (Docker Hub bloqueado pela política de
+  rede da organização); `docker compose config` validou limpo. Pendente validação num
+  ambiente com acesso ao registry;
+- [x] `GET /health` responde 200 sempre que o processo API está de pé;
+- [x] `GET /health/ready` retorna `postgres: connected` e `redis: connected` **reais** (não
   hardcoded) quando os serviços estão saudáveis, e reporta o erro real quando não estão;
-- [ ] Celery worker processa a task `health.ping` e o resultado é lido de volta pela API;
-- [ ] `alembic upgrade head` roda sem erro contra o Postgres do compose;
-- [ ] Frontend carrega o Dashboard e exibe o status vindo da API (não mockado);
-- [ ] `pytest` passa localmente contra os serviços reais do compose;
-- [ ] Nenhum segredo commitado.
+- [x] Celery worker processa a task `health.ping` e o resultado é lido de volta pela API;
+- [x] `alembic upgrade head` roda sem erro contra o Postgres do compose;
+- [x] Frontend carrega o Dashboard e exibe o status vindo da API (não mockado);
+- [x] `pytest` passa localmente contra os serviços reais do compose;
+- [x] Nenhum segredo commitado.
 
 ---
 
-## FASE 2 — Storage
+## FASE 2 — Storage 🟡 CÓDIGO COMPLETO · VALIDAÇÃO REAL PENDENTE DE CREDENCIAL
 
-- `StorageProvider` (interface) em `services/storage`;
-- `GoogleDriveStorageProvider` real (OAuth ou service account — decidir conforme
-  credencial disponível);
-- Estrutura lógica `/AVATARS /VOICES /MOTIONS /PRODUCTS /SCENES /PROJECTS /RENDERS /MODELS
-  /BACKUPS` criada no Drive;
-- Manifests de storage (metadata do que está local vs. no Drive);
-- Rotina de sync e de backup do PostgreSQL para o Drive (seção 65).
+- `StorageProvider` (interface, em `packages/schemas`) + `GoogleDriveStorageProvider` real
+  (`services/storage`) — service account, chamadas REST diretas (`httpx` + `google-auth`,
+  não `google-api-python-client` — ver `docs/ARCHITECTURE.md` §4.4);
+- Árvore oficial **já criada manualmente no Drive** pelo usuário (18 pastas, raiz
+  `13BTUf5Oyp8fb_CT2H0OJ6LeuZKzm3pxE`) — o provider **descobre e valida por nome, nunca
+  cria/renomeia/apaga** as 18 pastas de topo. Substitui a estrutura lógica
+  `/AVATARS /VOICES /MOTIONS /...` cogitada antes de a árvore real existir — ver a lista
+  completa em `docs/STORAGE_GOOGLE_DRIVE.md`;
+- Subpastas abaixo de cada uma das 18 (convenção de caminho/versão dos callers) são
+  descobertas/criadas idempotentemente;
+- Upload/download com streaming real (resumable upload, `alt=media` download em chunks);
+- Retry com backoff para 429/5xx, timeouts configuráveis, cache de IDs descobertos;
+- Estados `NOT_CONFIGURED / CONNECTING / CONNECTED / DEGRADED / ERROR` — `DEGRADED` quando
+  autentica mas a árvore não bate com a esperada;
+- Proteção contra exclusão permanente: `delete()` só apaga sem `allow_permanent=True` dentro
+  de `02_SISTEMA_STORAGE/_tmp/`;
+- `GET /storage/status` na API; CLI `dhf-storage check` (conexão + árvore);
+- Testes unitários (mockados, `respx`) e testes de integração reais (separados, só rodam com
+  credencial real configurada).
 
-**Depende de:** credencial Google Drive (ver `docs/ARCHITECTURE.md`, seção 10).
+**Pendente nesta fase** (não pedido no card de Storage, registrado para não perder o fio):
+rotina de backup do PostgreSQL para o Drive (seção 65) — ainda não implementada.
+
+**Depende de:** credencial Google Drive real (service account) para a validação ao vivo —
+ver `docs/ARCHITECTURE.md` §10. Sem ela, o provider reporta `NOT_CONFIGURED` honestamente;
+código e testes unitários já estão prontos e passam sem credencial.
 **DoD:** upload real, download real, arquivo baixado é byte-idêntico ao enviado, erro de
-rede tratado e reportado, sync testado com arquivo real.
+rede tratado e reportado, sync testado com arquivo real — **ainda não cumprido**: falta a
+credencial real para rodar os testes de integração (`tests/storage/test_google_drive_integration.py`,
+hoje `SKIPPED`). Ver relatório da sessão que implementou esta fase para o estado exato.
 
 ## FASE 3 — Avatar Registry
 

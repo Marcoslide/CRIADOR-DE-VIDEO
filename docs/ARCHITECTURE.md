@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Digital Human Video Factory
 
-> Status deste documento: **v0.1 — FASE 1 (Foundation)**.
+> Status deste documento: **v0.2 — FASE 1 (Foundation) concluída · FASE 2 (Storage) implementada**.
 > Este documento é vivo. Cada fase implementada deve atualizar as seções relevantes.
 
 ---
@@ -41,8 +41,9 @@ CRIADOR-DE-VIDEO/
 ├── core/                    # Domínios de negócio (entidades, regras) — FASE 3+
 │   ├── avatars/  voices/  motions/  products/
 │   ├── characters/  channels/  projects/  scenes/  quality/
-├── services/                # Serviços de orquestração — FASE 2, 5, 6, 8
-│   ├── director/  storage/  gpu_orchestrator/  render/  postproduction/
+├── services/
+│   ├── storage/               # dhf-storage: GoogleDriveStorageProvider — FASE 2 (implementado)
+│   └── director/  gpu_orchestrator/  render/  postproduction/  # FASE 5, 6, 8
 ├── engines/                 # Adapters para motores externos — FASE 7+
 │   ├── unreal/  audio2face/  metahuman_animator/
 │   ├── voice/  motion/  generative_video/  quality/
@@ -67,14 +68,15 @@ CRIADOR-DE-VIDEO/
 └── README.md
 ```
 
-### Por que os diretórios `core/`, `services/`, `engines/`, `infra/hostinger`,
+### Por que os diretórios `core/`, `engines/`, `infra/hostinger`,
 ### `infra/systemd`, `infra/monitoring`, `packages/sdk` e `workers/gpu_worker` não existem ainda fisicamente
 
 Regra **ZERO FAKE** (seção 68 do prompt-mestre): não criamos estrutura vazia fingindo
 progresso. Cada um desses diretórios nasce **junto com o primeiro código real que o
 ocupa**, na fase correspondente (indicada acima e detalhada no `ROADMAP.md`). A árvore
 completa já está definida e versionada aqui — é o contrato de onde cada coisa vai morar —
-mas só viram pastas no commit da fase que as implementa.
+mas só viram pastas no commit da fase que as implementa. `services/storage` foi o primeiro
+a nascer (Fase 2); `services/director` e os demais seguem o mesmo padrão nas fases futuras.
 
 ### Por que Python "packages" e não apenas pastas soltas
 
@@ -147,12 +149,13 @@ core/<dominio>/
 | `redis` (redis-py, cliente `asyncio`) | cache/broker | Sim |
 | `celery[redis]` | jobs em background | Sim |
 | `structlog` | logging estruturado (JSON) | Sim |
-| `httpx` | cliente HTTP (usado por health checks e, depois, providers) | Sim |
+| `httpx` | cliente HTTP assíncrono — health checks e, desde a Fase 2, chamadas REST diretas à Google Drive API v3 no `GoogleDriveStorageProvider` | Sim |
 | `pytest` / `pytest-asyncio` / `pytest-cov` | testes | Sim (dev) |
 | `ruff` | lint/format | Sim (dev) |
 | `openai` | Director AI (`OpenAIProvider`) | Fase 5 |
 | `anthropic` | Director AI (`AnthropicProvider`, opcional) | Fase 5 |
-| `google-api-python-client` + `google-auth` | `GoogleDriveStorageProvider` | Fase 2 |
+| `google-auth` | credenciais de service account / OAuth para `GoogleDriveStorageProvider` | Sim (Fase 2) |
+| `respx` | mock de `httpx` nos testes unitários do Storage | Sim (Fase 2, dev) |
 | `boto3` | `S3StorageProvider` / `R2StorageProvider` (futuro) | Fase futura |
 | SDK do provider de voz escolhido (Chatterbox/ElevenLabs) | `VoiceProvider` | Fase 4 |
 | `pynvml` / `nvidia-ml-py` | telemetria real de GPU no GPU Orchestrator | Fase 6 |
@@ -188,6 +191,7 @@ transparência:
 | Vite | Create React App (descontinuado), Next.js | V1 é SPA pura consumindo a API; Next.js traria SSR/roteamento server-side desnecessário agora |
 | Tailwind CSS | CSS-in-JS, Material UI, Ant Design | Controle visual fino para um "produto premium" (seção 75) sem herdar estética de biblioteca de componentes genérica |
 | TanStack Query | Redux, SWR | Cache/estado de servidor (status de GPU, filas, jobs) é o padrão de dados dominante nesta UI |
+| REST direto via `httpx` (Drive API v3) | `google-api-python-client` | O cliente oficial é síncrono (exigiria `run_in_threadpool` em toda chamada, numa app 100% assíncrona) e usa geração dinâmica de métodos via discovery document, dificultando tipagem e streaming real de upload/download. REST direto com `httpx.AsyncClient` dá controle nativo sobre upload resumable e download em chunks, e mantém o mesmo cliente HTTP já usado nos health checks. `google-auth` continua sendo usado — só para obter/renovar o token, não para chamar a API |
 
 Nenhuma dessas escolhas é definitiva a ponto de travar o projeto — todas são isoladas e
 substituíveis sem reescrever domínio, seguindo o Provider Pattern (seção 67) e a separação
@@ -203,10 +207,11 @@ diretamente do código de negócio. Interfaces previstas:
 
 ```python
 class StorageProvider(Protocol):
+    async def get_status(self, *, force_refresh: bool = False) -> StorageStatus: ...
     async def upload(self, local_path: str, remote_path: str) -> StorageManifestEntry: ...
     async def download(self, remote_path: str, local_path: str) -> None: ...
     async def exists(self, remote_path: str) -> bool: ...
-    async def delete(self, remote_path: str) -> None: ...
+    async def delete(self, remote_path: str, *, allow_permanent: bool = False) -> None: ...
     async def list(self, prefix: str) -> list[StorageManifestEntry]: ...
     async def move(self, src: str, dst: str) -> None: ...
     async def copy(self, src: str, dst: str) -> None: ...
@@ -267,6 +272,55 @@ algo `NOT_CONFIGURED`/`NOT_INSTALLED`, nunca gera um MP4 placeholder fingindo re
 
 Notação Pydantic/SQLAlchemy simplificada, campos essenciais (a seção 12 e seguintes do
 prompt-mestre têm a lista completa; aqui consolidamos o modelo de dados).
+
+### Storage (seção 6 — implementado na Fase 2, `packages/schemas/dhf_schemas/storage.py`)
+
+Único bloco desta seção que já é código real, não apenas design — os demais schemas deste
+capítulo continuam como contrato para a Fase 3+.
+
+```python
+class StorageConnectionStatus(str, Enum):
+    NOT_CONFIGURED = "not_configured"  # nenhuma credencial configurada/carregável
+    CONNECTING = "connecting"          # refresh de status em andamento (transitório)
+    CONNECTED = "connected"            # autenticado, raiz acessível, árvore oficial completa
+    DEGRADED = "degraded"              # autenticado e acessível, mas árvore incompleta/inesperada
+    ERROR = "error"                    # credencial presente mas falhou autenticação/chamada
+
+class TreeValidationResult(BaseModel):
+    expected: list[str]
+    found: list[str]
+    missing: list[str]
+    unexpected: list[str]              # pastas extras na raiz, fora da lista oficial — não é erro, só informativo
+    valid: bool                        # True apenas se `missing` estiver vazio
+
+class StorageStatus(BaseModel):
+    status: StorageConnectionStatus
+    detail: str | None
+    root_folder_id: str | None
+    tree: TreeValidationResult | None
+    checked_at: datetime
+
+class StorageManifestEntry(BaseModel):
+    remote_path: str            # caminho lógico ex.: "03_AVATAR_IDENTITY_FOTOS/lia/v1/head360/000.png"
+    provider_id: str            # ID nativo do provider (Drive file id)
+    size_bytes: int
+    mime_type: str
+    checksum: str | None        # md5Checksum do Drive quando disponível
+    version: str | None         # convenção de versão do caller (ex.: "v1"), não imposta pelo provider
+    modified_at: datetime
+    web_view_url: str | None
+
+class SyncReport(BaseModel):
+    uploaded: list[str]
+    skipped_unchanged: list[str]
+    failed: list[tuple[str, str]]      # (caminho, motivo)
+    duration_s: float
+```
+
+`StorageProvider` (Protocol, seção 5 acima) é a interface; `GoogleDriveStorageProvider`
+(`services/storage`) é a única implementação até aqui. Detalhes de configuração, a árvore
+oficial de 18 pastas e a convenção de caminhos/versão estão em
+`docs/STORAGE_GOOGLE_DRIVE.md`.
 
 ### Avatar (seção 12)
 
@@ -639,7 +693,7 @@ até lá — nunca simulando sucesso.
 
 | Credencial | Usada por | Fase |
 |---|---|---|
-| Google Drive OAuth client / service account JSON | `GoogleDriveStorageProvider` | 2 |
+| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` (conteúdo) ou `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` (caminho) | `GoogleDriveStorageProvider` | 2 — **ainda não fornecida**; provider reporta `NOT_CONFIGURED` até então |
 | `OPENAI_API_KEY` | `OpenAIProvider` (Director AI) | 5 |
 | `ANTHROPIC_API_KEY` (opcional) | `AnthropicProvider` (Director AI) | 5 |
 | `ELEVENLABS_API_KEY` | `ElevenLabsProvider` | 4 |

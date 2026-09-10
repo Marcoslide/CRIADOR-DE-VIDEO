@@ -76,16 +76,31 @@ externas. Ver seções 6-10 deste documento.
 - Testes unitários (mockados, `respx`) e testes de integração reais (separados, só rodam com
   credencial real configurada).
 
-**Pendente nesta fase** (não pedido no card de Storage, registrado para não perder o fio):
-rotina de backup do PostgreSQL para o Drive (seção 65) — ainda não implementada.
+**Rodada de hardening** (mesma fase, sem mudar o status "validação pendente" abaixo):
+- corrigido bug real de retry no upload — um `AsyncIterator` já consumido era reenviado
+  numa nova tentativa, mandando corpo vazio/truncado sem erro nenhum. Agora cada tentativa
+  reabre o arquivo do byte 0 (`content_factory`), com teste de regressão que prova o bug
+  (verificado isoladamente contra o comportamento antigo antes do fix);
+- `/health*` e `/storage/status` nunca mais devolvem `str(exc)`/URL/host cru —
+  `dhf_shared.errors.sanitize_error` classifica por tipo, log completo continua só interno;
+- `docker-compose.yml` dividido em base (sem porta de Postgres/Redis publicada, sem senha
+  padrão, falha alto sem credencial) + `docker-compose.override.yml` (dev) +
+  `docker-compose.prod.yml` (nginx em vez do servidor de dev do Vite);
+- CI no GitHub Actions (`.github/workflows/ci.yml`): unitário sem serviços, integração com
+  Postgres/Redis reais, ruff, frontend, scan de segredos (gitleaks).
+
+**Pendente nesta fase** (não pedido nos cards de Storage, registrado para não perder o
+fio): rotina de backup do PostgreSQL para o Drive (seção 65) — ainda não implementada.
 
 **Depende de:** credencial Google Drive real (service account) para a validação ao vivo —
 ver `docs/ARCHITECTURE.md` §10. Sem ela, o provider reporta `NOT_CONFIGURED` honestamente;
 código e testes unitários já estão prontos e passam sem credencial.
 **DoD:** upload real, download real, arquivo baixado é byte-idêntico ao enviado, erro de
-rede tratado e reportado, sync testado com arquivo real — **ainda não cumprido**: falta a
-credencial real para rodar os testes de integração (`tests/storage/test_google_drive_integration.py`,
-hoje `SKIPPED`). Ver relatório da sessão que implementou esta fase para o estado exato.
+rede tratado e reportado, sync testado com arquivo real — **ainda não cumprido, mesmo após
+a rodada de hardening**: falta a credencial real para rodar os testes de integração
+(`tests/storage/test_google_drive_integration.py`, hoje `SKIPPED`). **A Fase 2 não está
+concluída** até esses testes rodarem de verdade. Ver relatório da sessão para o estado
+exato.
 
 ## FASE 3 — Avatar Registry
 

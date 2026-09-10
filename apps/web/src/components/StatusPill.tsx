@@ -1,6 +1,13 @@
 import { AlertTriangle, CheckCircle2, CircleSlash, Loader2 } from "lucide-react";
 
-export type PillState = "connected" | "error" | "timeout" | "not_configured" | "checking";
+export type PillState =
+  | "connected"
+  | "error"
+  | "timeout"
+  | "not_configured"
+  | "checking"
+  | "connecting"
+  | "degraded";
 
 const STYLES: Record<PillState, { label: string; className: string; icon: React.ReactNode }> = {
   connected: {
@@ -27,6 +34,16 @@ const STYLES: Record<PillState, { label: string; className: string; icon: React.
     label: "Verificando…",
     className: "bg-slate-500/10 text-slate-400 ring-slate-500/30",
     icon: <Loader2 size={14} className="animate-spin" />,
+  },
+  connecting: {
+    label: "Conectando…",
+    className: "bg-slate-500/10 text-slate-400 ring-slate-500/30",
+    icon: <Loader2 size={14} className="animate-spin" />,
+  },
+  degraded: {
+    label: "Degradado",
+    className: "bg-amber-500/10 text-amber-400 ring-amber-500/30",
+    icon: <AlertTriangle size={14} />,
   },
 };
 

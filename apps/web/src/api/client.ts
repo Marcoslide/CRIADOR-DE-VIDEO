@@ -1,4 +1,4 @@
-import type { ComponentCheck, HealthResponse, ReadinessResponse } from "./types";
+import type { ComponentCheck, HealthResponse, ReadinessResponse, StorageStatus } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
@@ -14,4 +14,5 @@ export const api = {
   health: () => getJSON<HealthResponse>("/health"),
   readiness: () => getJSON<ReadinessResponse>("/health/ready"),
   workerHealth: () => getJSON<ComponentCheck>("/health/worker"),
+  storageStatus: () => getJSON<StorageStatus>("/storage/status"),
 };

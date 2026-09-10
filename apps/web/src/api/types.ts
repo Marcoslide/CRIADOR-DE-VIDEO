@@ -22,3 +22,22 @@ export interface ReadinessResponse {
   checks: ComponentCheck[];
   checked_at: string;
 }
+
+// Espelha packages/schemas/dhf_schemas/storage.py
+export type StorageConnectionStatus = "not_configured" | "connecting" | "connected" | "degraded" | "error";
+
+export interface TreeValidationResult {
+  expected: string[];
+  found: string[];
+  missing: string[];
+  unexpected: string[];
+  valid: boolean;
+}
+
+export interface StorageStatus {
+  status: StorageConnectionStatus;
+  detail: string | null;
+  root_folder_id: string | null;
+  tree: TreeValidationResult | null;
+  checked_at: string;
+}

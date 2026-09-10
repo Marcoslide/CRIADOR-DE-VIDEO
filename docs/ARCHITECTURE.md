@@ -753,8 +753,21 @@ Nenhum destes pontos bloqueia a Fase 1. Eles bloqueiam, nesta ordem, as Fases 6 
 ## 13. Segurança (fundação)
 
 - Segredos exclusivamente via variáveis de ambiente (`.env`, nunca commitado — só
-  `.env.example` com placeholders);
+  `.env.example` com placeholders, marcado como "dev only", nunca copiado direto para
+  produção — ver aviso no topo do próprio arquivo);
 - `.gitignore` cobre `.env`, artefatos de build, caches, binários de modelo;
 - Sem chave de API no frontend: o `web` nunca fala diretamente com OpenAI/ElevenLabs/Drive —
   sempre via `api`.
+- **Sanitização de erros em endpoints públicos** (`dhf_shared.errors.sanitize_error`):
+  `/health*` e `/storage/status` nunca devolvem `str(exc)`, URL interna, host/porta ou
+  stack trace — só um `error_code` + mensagem genérica classificados pelo tipo da exceção.
+  O erro completo continua indo para o log estruturado (`dhf_shared.logging`), nunca para
+  o cliente HTTP.
+- **`docker-compose.yml` (base) nunca publica porta de PostgreSQL/Redis** e recusa subir
+  sem `POSTGRES_USER`/`PASSWORD`/`DB` explícitos (`${VAR:?...}`) — dev ganha conveniência
+  (porta em `127.0.0.1`, senha padrão) só via `docker-compose.override.yml`, carregado
+  automaticamente por `docker compose up` mas nunca usado em produção
+  (`docker-compose.prod.yml`, uso explícito com `-f`). Limitação conhecida: o guard
+  `${VAR:?...}` detecta variável *ausente*, não "ainda com o valor de exemplo copiado" —
+  ver aviso em `.env.example`.
 - `docs/SECURITY.md` completo é entregável de uma fase própria (seção 77), não da Fase 1.

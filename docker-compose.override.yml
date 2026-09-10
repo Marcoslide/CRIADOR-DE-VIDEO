@@ -1,0 +1,37 @@
+# Conveniências de DESENVOLVIMENTO — carregado automaticamente por `docker compose up`
+# junto com docker-compose.yml (comportamento padrão do Compose). Nunca usado em produção
+# (lá é `docker compose -f docker-compose.yml -f docker-compose.prod.yml ...`, sem este
+# arquivo).
+#
+# Credenciais aqui são só para uso local (mesmos valores de .env.example) — têm default
+# porque em dev a conveniência de não precisar configurar nada de novo importa mais do que
+# em produção, onde o arquivo base já recusa subir sem POSTGRES_PASSWORD real.
+
+services:
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dhf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dhf}
+      POSTGRES_DB: ${POSTGRES_DB:-dhf}
+    # 127.0.0.1, nunca 0.0.0.0: acessível para ferramentas locais (psql, client gráfico),
+    # não para a rede/internet.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  api:
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      target: dev
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api

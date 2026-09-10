@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend-unit:
+    name: Backend · testes unitários (sem serviços externos)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: uv sync
+        run: uv sync --all-packages
+
+      - name: pytest (unitário — sem Postgres/Redis/credencial real)
+        run: uv run pytest -m "not requires_services and not integration" -v
+
+  backend-integration:
+    name: Backend · testes de integração (Postgres + Redis reais)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dhf
+          POSTGRES_PASSWORD: dhf
+          POSTGRES_DB: dhf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dhf -d dhf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: test
+      LOG_LEVEL: INFO
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: dhf
+      POSTGRES_PASSWORD: dhf
+      POSTGRES_DB: dhf
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      REDIS_DB: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: uv sync
+        run: uv sync --all-packages
+
+      - name: Alembic — aplicar migrations
+        run: uv run alembic -c migrations/alembic.ini upgrade head
+
+      - name: Subir worker Celery em background
+        run: |
+          nohup uv run --project workers/job_worker celery -A worker.celery_app worker \
+            --loglevel=INFO > celery.log 2>&1 &
+          sleep 5
+
+      - name: pytest (integração — Postgres/Redis/worker reais)
+        run: uv run pytest -m requires_services -v
+
+      - name: Logs do worker (se algo falhar)
+        if: failure()
+        run: cat celery.log || true
+
+  lint:
+    name: Backend · ruff check + format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: uv sync
+        run: uv sync --all-packages
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  frontend:
+    name: Frontend · typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  secrets-scan:
+    name: Verificação de segredos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Instalar gitleaks
+        env:
+          GITLEAKS_VERSION: "8.21.2"
+        run: |
+          set -euo pipefail
+          curl -sSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+          tar xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: gitleaks detect
+        run: gitleaks detect --source . --redact --verbose

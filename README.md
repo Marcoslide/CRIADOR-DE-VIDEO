@@ -78,8 +78,8 @@ Requer PostgreSQL e Redis rodando localmente (ou via `docker compose up postgres
 # Backend
 uv sync --all-packages
 uv run --project apps/api alembic -c migrations/alembic.ini upgrade head
-uv run --project apps/api uvicorn app.main:app --reload
-uv run --project workers/job_worker celery -A worker.celery_app worker --loglevel=INFO
+uv run --directory apps/api uvicorn app.main:app --reload
+uv run --directory workers/job_worker celery -A worker.celery_app worker --loglevel=INFO
 
 # Frontend
 cd apps/web

@@ -76,7 +76,7 @@ jobs:
 
       - name: Subir worker Celery em background
         run: |
-          nohup uv run --project workers/job_worker celery -A worker.celery_app worker \
+          nohup uv run --directory workers/job_worker celery -A worker.celery_app worker \
             --loglevel=INFO > celery.log 2>&1 &
           sleep 5
 

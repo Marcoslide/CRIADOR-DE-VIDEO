@@ -1,0 +1,19 @@
+[project]
+name = "dhf-api"
+version = "0.1.0"
+description = "Digital Human Factory — API HTTP principal (FastAPI)"
+requires-python = ">=3.11"
+dependencies = [
+    "dhf-shared",
+    "dhf-schemas",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "redis>=5.0",
+]
+
+[tool.uv.sources]
+dhf-shared = { workspace = true }
+dhf-schemas = { workspace = true }
+
+[tool.uv]
+package = false

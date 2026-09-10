@@ -199,6 +199,57 @@ async def test_upload_creates_new_file(provider, tmp_path, monkeypatch) -> None:
 
 
 @respx.mock
+async def test_upload_retry_resends_complete_file_after_stream_consumed(
+    provider, tmp_path, monkeypatch
+) -> None:
+    """Regressão: um AsyncIterator já consumido (mesmo que parcialmente) não pode ser
+    reaproveitado numa nova tentativa — precisa reabrir o arquivo do byte 0. Sem o fix,
+    a 2a chamada ao PUT receberia um corpo vazio/truncado (o generator já esgotado),
+    silenciosamente corrompendo o upload em vez de reenviar o arquivo inteiro."""
+
+    async def fake_resolve(segments, *, create_missing):
+        return "parent-id"
+
+    async def fake_find(parent_id, filename):
+        return None
+
+    monkeypatch.setattr(provider, "_resolve_path", fake_resolve)
+    monkeypatch.setattr(provider, "_find_file", fake_find)
+    # chunk pequeno de propósito: força múltiplos chunks por tentativa, exercitando o
+    # generator de verdade em vez de um único read() que mascararia o bug.
+    monkeypatch.setattr(provider._settings, "google_drive_upload_chunk_size_bytes", 16)
+
+    content = bytes(range(256)) * 4  # 1024 bytes -> 64 chunks de 16 bytes por tentativa
+    local_file = tmp_path / "large.bin"
+    local_file.write_bytes(content)
+
+    respx.post(UPLOAD_URL, params={"uploadType": "resumable"}).mock(
+        return_value=httpx.Response(
+            200, headers={"Location": "https://upload.example/session-retry"}
+        )
+    )
+    put_route = respx.put("https://upload.example/session-retry").mock(
+        side_effect=[
+            httpx.Response(500, json={"error": "instabilidade simulada"}),
+            httpx.Response(200, json=_file("retried-file-id", "large.bin", size=len(content))),
+        ]
+    )
+
+    entry = await provider.upload(str(local_file), "03_AVATAR_IDENTITY_FOTOS/large.bin")
+
+    assert put_route.call_count == 2
+    first_attempt_body = put_route.calls[0].request.content
+    second_attempt_body = put_route.calls[1].request.content
+
+    # a tentativa que falhou já tinha recebido o arquivo inteiro (não é isso que estava
+    # quebrado) — o que importa é que o RETRY também recebeu o arquivo inteiro, não um
+    # corpo vazio/truncado por reaproveitar um generator já esgotado.
+    assert first_attempt_body == content
+    assert second_attempt_body == content
+    assert entry.provider_id == "retried-file-id"
+
+
+@respx.mock
 async def test_upload_overwrites_existing_file_via_patch(provider, tmp_path, monkeypatch) -> None:
     async def fake_resolve(segments, *, create_missing):
         return "parent-id"

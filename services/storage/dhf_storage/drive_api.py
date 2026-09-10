@@ -5,7 +5,7 @@ chamada de rede passa por `with_retry`. `google_drive.py` compõe estas primitiv
 implementar `StorageProvider`.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -147,7 +147,7 @@ async def initiate_resumable_upload(
 async def upload_content_stream(
     client: httpx.AsyncClient,
     upload_url: str,
-    content: AsyncIterator[bytes],
+    content_factory: Callable[[], AsyncIterator[bytes]],
     mime_type: str,
     size_bytes: int,
     *,
@@ -157,12 +157,19 @@ async def upload_content_stream(
 ) -> dict[str, Any]:
     """Envia o corpo inteiro em streaming num único PUT. Não implementa retomada parcial
     após falha a meio do upload — nesse caso, o próprio with_retry refaz a tentativa
-    inteira (ver docs/STORAGE_GOOGLE_DRIVE.md)."""
+    inteira (ver docs/STORAGE_GOOGLE_DRIVE.md).
+
+    `content_factory` — e não um AsyncIterator já pronto — de propósito: um stream
+    assíncrono não pode ser relido do início depois de (parcialmente) consumido. Se
+    passássemos o mesmo iterator para cada tentativa do with_retry, um retry depois de
+    uma falha a meio do envio mandaria um corpo vazio/truncado sem erro nenhum — corrupção
+    silenciosa. `content_factory()` é chamada de novo a cada tentativa, reabrindo o arquivo
+    do byte 0 (ver GoogleDriveStorageProvider._read_chunks)."""
 
     async def _call():
         response = await client.put(
             upload_url,
-            content=content,
+            content=content_factory(),
             headers={"Content-Type": mime_type, "Content-Length": str(size_bytes)},
         )
         response.raise_for_status()

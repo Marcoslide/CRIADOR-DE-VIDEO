@@ -302,11 +302,12 @@ class GoogleDriveStorageProvider:
             **self._retry_kwargs(),
         )
 
+        chunk_size = self._settings.google_drive_upload_chunk_size_bytes
         start = time.perf_counter()
         raw = await drive_api.upload_content_stream(
             client,
             upload_url,
-            self._read_chunks(local_path, self._settings.google_drive_upload_chunk_size_bytes),
+            lambda: self._read_chunks(local_path, chunk_size),
             mime_type,
             size_bytes,
             **self._retry_kwargs(),

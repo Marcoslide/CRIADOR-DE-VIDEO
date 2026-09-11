@@ -9,6 +9,7 @@ de expor só o resultado sanitizado ao cliente.
 
 from dataclasses import dataclass
 
+import celery.exceptions
 import httpx
 import redis.exceptions
 import sqlalchemy.exc
@@ -22,7 +23,16 @@ class SanitizedError:
 
 def sanitize_error(exc: BaseException) -> SanitizedError:
     """Classifica pelo TIPO da exceção, nunca pelo texto dela."""
-    if isinstance(exc, TimeoutError | httpx.TimeoutException | redis.exceptions.TimeoutError):
+    # celery.exceptions.TimeoutError NÃO herda do TimeoutError embutido do Python — é uma
+    # classe própria (CeleryError -> TaskError -> TimeoutError), levantada por
+    # `AsyncResult.get(timeout=...)` quando o worker não responde a tempo.
+    if isinstance(
+        exc,
+        TimeoutError
+        | httpx.TimeoutException
+        | redis.exceptions.TimeoutError
+        | celery.exceptions.TimeoutError,
+    ):
         return SanitizedError("timeout", "A operação excedeu o tempo limite.")
 
     if isinstance(

@@ -1,6 +1,7 @@
 """dhf_shared.errors.sanitize_error — nunca deixar host/porta/DSN/caminho vazar numa
 resposta pública. Testa a classificação por TIPO, nunca por texto da exceção."""
 
+import celery.exceptions
 import httpx
 import redis.exceptions
 import sqlalchemy.exc
@@ -19,6 +20,17 @@ def test_httpx_timeout_is_sanitized() -> None:
     result = sanitize_error(httpx.ConnectTimeout("connect timeout", request=request))
     assert result.code == "timeout"
     assert "internal-service.example" not in result.message
+
+
+def test_celery_timeout_error_is_sanitized() -> None:
+    """celery.exceptions.TimeoutError NÃO herda do TimeoutError embutido do Python (é
+    CeleryError -> TaskError -> TimeoutError) — precisa de checagem própria. É o que
+    `AsyncResult.get(timeout=...)` levanta em /health/worker quando o worker não responde
+    a tempo; sem isso, cai no fallback genérico "internal_error" e health.py nunca reporta
+    status="timeout" de verdade."""
+    result = sanitize_error(celery.exceptions.TimeoutError("The operation timed out."))
+    assert result.code == "timeout"
+    assert result.message == "A operação excedeu o tempo limite."
 
 
 def test_connection_error_is_sanitized() -> None:

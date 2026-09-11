@@ -96,3 +96,31 @@ async def test_worker_health_round_trip(client: httpx.AsyncClient) -> None:
     assert body["name"] == "celery_worker"
     assert body["status"] == "connected"
     assert "pong" in body["detail"]
+
+
+async def test_worker_health_reports_timeout_when_round_trip_times_out(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simula o que celery.exceptions.TimeoutError real dispara quando
+    AsyncResult.get(timeout=...) não recebe resposta a tempo (ex.: worker sem consumidor —
+    o que aconteceu de verdade no 1º run do CI desta fase). Confirma que /health/worker
+    reporta status="timeout" e error_code="timeout" de verdade, não o fallback genérico
+    "internal_error" (celery.exceptions.TimeoutError não herda do TimeoutError embutido)."""
+    import celery.exceptions
+
+    class _FakeAsyncResult:
+        def get(self, timeout: float) -> dict:
+            raise celery.exceptions.TimeoutError("The operation timed out.")
+
+    class _FakePing:
+        def apply_async(self) -> _FakeAsyncResult:
+            return _FakeAsyncResult()
+
+    monkeypatch.setattr("app.routers.health.celery_ping", _FakePing())
+
+    response = await client.get("/health/worker")
+    body = response.json()
+
+    assert body["status"] == "timeout"
+    assert body["error_code"] == "timeout"
+    assert body["detail"] == "A operação excedeu o tempo limite."

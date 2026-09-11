@@ -2,14 +2,20 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 #
 # Postgres e Redis propositalmente NÃO publicam porta nenhuma aqui — só alcançáveis pela
-# rede interna do Compose (api/worker os acessam por nome de serviço). Credenciais vêm
-# só do .env real do nó (ou de um secret manager) — o arquivo base já recusa subir sem
-# POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB definidos, então não há valor padrão aqui
-# para "esquecer" de trocar.
+# rede interna do Compose (api/worker os acessam por nome de serviço). Credenciais vêm só
+# do .env real do nó (ou de um secret manager) — as guardas ${VAR:?...} abaixo são o que
+# recusa subir sem POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB definidos (o arquivo base
+# não tem guarda nenhuma: sua interpolação acontece antes do merge com este overlay, então
+# uma guarda lá disparia mesmo em dev, antes do docker-compose.override.yml ter a chance
+# de fornecer seu default).
 
 services:
   postgres:
     restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD — nunca use um valor padrão em produção}
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB}
 
   redis:
     restart: unless-stopped

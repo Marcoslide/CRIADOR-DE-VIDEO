@@ -763,11 +763,15 @@ Nenhum destes pontos bloqueia a Fase 1. Eles bloqueiam, nesta ordem, as Fases 6 
   stack trace — só um `error_code` + mensagem genérica classificados pelo tipo da exceção.
   O erro completo continua indo para o log estruturado (`dhf_shared.logging`), nunca para
   o cliente HTTP.
-- **`docker-compose.yml` (base) nunca publica porta de PostgreSQL/Redis** e recusa subir
-  sem `POSTGRES_USER`/`PASSWORD`/`DB` explícitos (`${VAR:?...}`) — dev ganha conveniência
-  (porta em `127.0.0.1`, senha padrão) só via `docker-compose.override.yml`, carregado
-  automaticamente por `docker compose up` mas nunca usado em produção
-  (`docker-compose.prod.yml`, uso explícito com `-f`). Limitação conhecida: o guard
-  `${VAR:?...}` detecta variável *ausente*, não "ainda com o valor de exemplo copiado" —
-  ver aviso em `.env.example`.
+- **`docker-compose.yml` (base) nunca publica porta de PostgreSQL/Redis** e não tem valor
+  padrão de credencial nem guard `${VAR:?...}` — a interpolação de cada arquivo do Compose
+  acontece antes do merge entre eles, então uma guard no base dispararia mesmo em dev,
+  antes do override ter a chance de aplicar seu default. Por isso a guard mora só em
+  `docker-compose.prod.yml` (`POSTGRES_USER`/`PASSWORD`/`DB` via `${VAR:?...}`, uso
+  explícito com `-f`, nunca carregado sozinho); dev ganha conveniência (porta em
+  `127.0.0.1`, senha padrão) via `docker-compose.override.yml`, carregado automaticamente
+  por `docker compose up` e nunca usado em produção. `env_file: [.env]` de `api`/`worker`
+  no base é opcional (`required: false`) para não exigir um `.env` existir num checkout
+  limpo. Limitação conhecida: o guard `${VAR:?...}` detecta variável *ausente*, não "ainda
+  com o valor de exemplo copiado" — ver aviso em `.env.example`.
 - `docs/SECURITY.md` completo é entregável de uma fase própria (seção 77), não da Fase 1.

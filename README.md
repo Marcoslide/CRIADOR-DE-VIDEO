@@ -94,6 +94,9 @@ mão (ou injete via secret manager) com segredos reais.
 Diferenças do overlay de produção (`docker-compose.prod.yml`):
 - PostgreSQL e Redis **não publicam porta nenhuma** — só alcançáveis pela rede interna do
   Compose;
+- a API liga somente em `127.0.0.1:${API_PORT:-8000}`. Como esta fundação ainda não tem
+  autenticação própria, exponha-a apenas por um reverse proxy TLS com autenticação e
+  firewall; nunca publique a porta 8000 diretamente na internet;
 - `POSTGRES_USER`/`PASSWORD`/`DB` e `VITE_API_URL` são obrigatórios (o compose recusa
   subir sem eles — `${VAR:?...}`), sem valor padrão;
 - `web` serve um build estático via nginx (não o servidor de desenvolvimento do Vite);
@@ -147,7 +150,7 @@ Com o backend no ar (Docker ou nativo):
 | `GET /storage/status` | Status real da integração com Google Drive |
 | `GET /status/system` | Status agregado (API/Postgres/Redis/worker/storage/GPU/OpenAI/Unreal/Audio2Face/MetaHuman) — o que o Dashboard consome |
 | `POST /jobs/diagnostic` → `GET /jobs/diagnostic/{id}` | Prova de ponta a ponta API → Redis → Worker |
-| `POST /avatars`, `GET /avatars`, `GET /avatars/{id}`, `PATCH /avatars/{id}` | Avatar Registry (CRUD + máquina de estados) |
+| `POST /avatars`, `GET /avatars`, `GET /avatars/{id}`, `PATCH /avatars/{id}`, `DELETE /avatars/{id}` | Avatar Registry (CRUD + máquina de estados; PATCH/DELETE exigem versão esperada) |
 
 No frontend (http://localhost:5173): `/` é o Dashboard (status real de todos os
 componentes) e `/avatars` é o Avatar Registry. As demais entradas do menu ainda mostram
@@ -176,7 +179,8 @@ uv run pytest -m requires_services                    # só os que precisam de P
 
 Sem mocks nos testes de integração: eles sobem contra PostgreSQL/Redis/worker de verdade
 (mesmas variáveis de `.env`) e confirmam que os dados realmente persistem — inclusive
-através de um restart do processo (`tests/api/test_avatars.py`). Os testes de
+após descartar e recriar todo o pool de conexões, equivalente à fronteira de persistência
+de um restart (`tests/api/test_avatars.py`). Os testes de
 `tests/storage/test_google_drive_integration.py` (marcados `integration`) precisam de uma
 credencial real do Google Drive e ficam `SKIPPED` sem ela — isso é esperado, não é falha.
 

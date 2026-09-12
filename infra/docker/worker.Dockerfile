@@ -2,7 +2,7 @@
 #   docker build -f infra/docker/worker.Dockerfile -t dhf-job-worker .
 FROM python:3.11-slim
 
-COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11.9 /uv /uvx /usr/local/bin/
 
 ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \

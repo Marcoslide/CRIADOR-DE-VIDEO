@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import mimetypes
 import os
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -67,6 +68,10 @@ class GoogleDriveStorageProvider:
         self._credential_load_error: CredentialLoadError | None = None
         self._status_cache: StorageStatus | None = None
         self._status_lock = asyncio.Lock()
+        # A Drive API não oferece "create folder if absent" atômico. Serializar a
+        # resolução criadora evita pastas duplicadas entre uploads concorrentes deste
+        # processo; coordenação entre múltiplos processos fica para a camada de jobs.
+        self._path_create_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ infra interna
 
@@ -119,12 +124,22 @@ class GoogleDriveStorageProvider:
 
     @staticmethod
     def _split(remote_path: str) -> tuple[list[str], str]:
-        parts = [p for p in PurePosixPath(remote_path.strip("/")).parts]
-        if not parts:
+        normalized = remote_path.strip("/")
+        if not normalized:
             raise ValueError("remote_path vazio")
+        raw_parts = normalized.split("/")
+        if any(part in {"", ".", ".."} or "\x00" in part for part in raw_parts):
+            raise ValueError("remote_path contém segmento inválido")
+        parts = list(PurePosixPath(normalized).parts)
         return parts[:-1], parts[-1]
 
     async def _resolve_path(self, segments: list[str], *, create_missing: bool) -> str:
+        if create_missing:
+            async with self._path_create_lock:
+                return await self._resolve_path_unlocked(segments, create_missing=True)
+        return await self._resolve_path_unlocked(segments, create_missing=False)
+
+    async def _resolve_path_unlocked(self, segments: list[str], *, create_missing: bool) -> str:
         if not segments:
             return self._settings.google_drive_root_folder_id
 
@@ -346,18 +361,26 @@ class GoogleDriveStorageProvider:
         token = await self._get_token()
         client = await self._get_client()
 
-        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        destination = Path(local_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".part", dir=destination.parent
+        )
+        os.close(fd)
+        temporary_path = Path(temporary_name)
         start = time.perf_counter()
         written = 0
         try:
-            async with aiofiles.open(local_path, "wb") as f:
+            async with aiofiles.open(temporary_path, "wb") as f:
                 async for chunk in drive_api.download_stream(client, token, existing["id"]):
                     await f.write(chunk)
                     written += len(chunk)
-        except Exception:
-            # nunca deixar um arquivo local parcial/corrompido se o download falhar no meio
+            # Troca atômica: um destino pré-existente só é substituído depois que o
+            # download termina. Falhas preservam a última cópia íntegra.
+            os.replace(temporary_path, destination)
+        except BaseException:
             with contextlib.suppress(OSError):
-                os.remove(local_path)
+                temporary_path.unlink()
             raise
         duration_s = round(time.perf_counter() - start, 3)
         self._logger.info(
@@ -404,7 +427,11 @@ class GoogleDriveStorageProvider:
 
     async def list(self, prefix: str) -> list[StorageManifestEntry]:
         self._require_configured()
-        segments = [p for p in PurePosixPath(prefix.strip("/")).parts]
+        normalized = prefix.strip("/")
+        raw_segments = normalized.split("/") if normalized else []
+        if any(segment in {"", ".", ".."} or "\x00" in segment for segment in raw_segments):
+            raise ValueError("prefix contém segmento inválido")
+        segments = list(PurePosixPath(normalized).parts) if normalized else []
         try:
             parent_id = await self._resolve_path(segments, create_missing=False)
         except FileNotFoundError:
@@ -472,6 +499,10 @@ class GoogleDriveStorageProvider:
         failed: list[tuple[str, str]] = []
 
         local_root = Path(local_dir)
+        if not local_root.exists():
+            raise FileNotFoundError(f"diretório local '{local_dir}' não existe")
+        if not local_root.is_dir():
+            raise NotADirectoryError(f"caminho local '{local_dir}' não é um diretório")
         for local_file in sorted(local_root.rglob("*")):
             if not local_file.is_file():
                 continue

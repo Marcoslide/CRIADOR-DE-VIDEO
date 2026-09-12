@@ -10,18 +10,17 @@ jobs:
     name: Backend · testes unitários (sem serviços externos)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Instalar uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: "0.11.9"
 
       - name: uv sync
-        run: uv sync --all-packages
+        run: uv sync --all-packages --frozen
 
       - name: pytest (unitário — sem Postgres/Redis/credencial real)
-        run: uv run pytest -m "not requires_services and not integration" -v
+        run: uv run pytest -m "not requires_services and not requires_worker_offline" -v
 
   backend-integration:
     name: Backend · testes de integração (Postgres + Redis reais)
@@ -61,27 +60,39 @@ jobs:
       REDIS_PORT: 6379
       REDIS_DB: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Instalar uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: "0.11.9"
 
       - name: uv sync
-        run: uv sync --all-packages
+        run: uv sync --all-packages --frozen
 
-      - name: Alembic — aplicar migrations
-        run: uv run alembic -c migrations/alembic.ini upgrade head
+      - name: Alembic — upgrade, rollback completo e novo upgrade
+        run: |
+          uv run alembic -c migrations/alembic.ini upgrade head
+          uv run alembic -c migrations/alembic.ini downgrade base
+          uv run alembic -c migrations/alembic.ini upgrade head
 
       - name: Subir worker Celery em background
         run: |
           nohup uv run --directory workers/job_worker celery -A worker.celery_app worker \
             --loglevel=INFO > celery.log 2>&1 &
+          echo $! > celery.pid
           sleep 5
 
       - name: pytest (integração — Postgres/Redis/worker reais)
         run: uv run pytest -m requires_services -v
+
+      - name: Parar worker e provar detecção offline real
+        run: |
+          kill "$(cat celery.pid)"
+          for i in {1..20}; do
+            if ! kill -0 "$(cat celery.pid)" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          uv run pytest -m requires_worker_offline -v
 
       - name: Logs do worker (se algo falhar)
         if: failure()
@@ -91,15 +102,14 @@ jobs:
     name: Backend · ruff check + format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Instalar uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: "0.11.9"
 
       - name: uv sync
-        run: uv sync --all-packages
+        run: uv sync --all-packages --frozen
 
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -111,9 +121,9 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: "npm"
@@ -123,22 +133,35 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+  docker-build:
+    name: Docker · build das imagens reais
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: docker build -f infra/docker/api.Dockerfile -t dhf-api:test .
+      - run: docker build -f infra/docker/worker.Dockerfile -t dhf-worker:test .
+      - run: >-
+          docker build -f infra/docker/web.Dockerfile --target production
+          --build-arg VITE_API_URL=http://localhost:8000 -t dhf-web:test .
+
   secrets-scan:
     name: Verificação de segredos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Instalar gitleaks
         env:
           GITLEAKS_VERSION: "8.21.2"
+          GITLEAKS_SHA256: "5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
         run: |
           set -euo pipefail
           curl -sSL \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
           tar xzf gitleaks.tar.gz gitleaks
           sudo mv gitleaks /usr/local/bin/
 

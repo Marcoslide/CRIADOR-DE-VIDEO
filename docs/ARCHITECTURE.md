@@ -150,7 +150,7 @@ core/<dominio>/
 | `celery[redis]` | jobs em background | Sim |
 | `structlog` | logging estruturado (JSON) | Sim |
 | `httpx` | cliente HTTP assíncrono — health checks e, desde a Fase 2, chamadas REST diretas à Google Drive API v3 no `GoogleDriveStorageProvider` | Sim |
-| `pytest` / `pytest-asyncio` / `pytest-cov` | testes | Sim (dev) |
+| `pytest` / `pytest-asyncio` | testes | Sim (dev) |
 | `ruff` | lint/format | Sim (dev) |
 | `openai` | Director AI (`OpenAIProvider`) | Fase 5 |
 | `anthropic` | Director AI (`AnthropicProvider`, opcional) | Fase 5 |
@@ -358,6 +358,14 @@ class Avatar(BaseModel):
     created_at: datetime
     updated_at: datetime
 ```
+
+Na fundação do PR #1, a máquina implementada é deliberadamente linear: só avança uma
+etapa e `version` funciona como lock otimista. Isso é suficiente enquanto ainda não há
+artefatos de Identity/Multiview/Mesh para reprovar. Antes de implementar essas fases, a
+transição deverá ganhar histórico imutável (ator, motivo, origem e timestamps) e regras
+explícitas de reprovação/reabertura; adicionar retornos livres agora criaria estados sem
+semântica e apagaria a trilha de auditoria. Portanto, rollback de status é requisito da
+fase que introduzir o primeiro quality gate, não uma transição genérica desta fundação.
 
 ### AvatarAsset — referências 360°/detalhe (seções 14-15)
 

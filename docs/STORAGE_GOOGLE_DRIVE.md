@@ -61,9 +61,12 @@ Todo método do provider recebe caminhos POSIX relativos à raiz, ex.:
 
 - **1º segmento**: obrigatoriamente um dos 18 nomes oficiais acima — só descoberto, nunca
   criado. Qualquer outro nome levanta `ValueError` imediatamente.
-- **Segmentos seguintes (pastas)**: descobertos e **criados idempotentemente** sob demanda
+- **Segmentos seguintes (pastas)**: descobertos e criados sob demanda
   (`create_missing=True` em upload/sync; `False` em list/exists/download/get_metadata —
-  operações de leitura nunca criam pasta como efeito colateral).
+  operações de leitura nunca criam pasta como efeito colateral). A criação é serializada
+  dentro de cada processo para evitar duplicatas locais. Como a Drive API não oferece
+  create-if-absent atômico, múltiplos processos escritores precisam ser coordenados pela
+  futura fila de jobs.
 - **Convenção de versão**: o provider não impõe nada — `v1`, `v2`, ... é só mais um
   segmento de caminho, a cargo de quem chama (Avatar Registry, Voice Bank, ... a partir da
   Fase 3). `StorageManifestEntry.version` fica disponível para o caller preencher.
@@ -128,8 +131,9 @@ que foi explicitamente compartilhado com o e-mail dela).
   múltiplos PUTs com `Content-Range`); se o PUT falhar, o `with_retry` reenvia a tentativa
   inteira, não só o pedaço que faltava.
 - **Download**: `GET .../files/{id}?alt=media`, resposta consumida via `client.stream(...)`
-  e gravada em disco em chunks. Se falhar no meio, o arquivo local parcial é removido antes
-  de propagar o erro — nunca deixa um arquivo corrompido para trás se passando por sucesso.
+  e gravada em disco em chunks num arquivo temporário vizinho. Só ao terminar ocorre troca
+  atômica; se falhar no meio, o temporário é removido e uma cópia anterior do destino é
+  preservada.
 - **Upload que já existe**: se já existe um arquivo com aquele nome na pasta de destino, o
   provider faz `PATCH` (atualiza o conteúdo do arquivo existente) em vez de `POST` (criar
   novo) — evita duplicar arquivos com o mesmo nome ao re-subir o mesmo `remote_path`.

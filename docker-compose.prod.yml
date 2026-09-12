@@ -23,7 +23,9 @@ services:
   api:
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # A API ainda não tem autenticação própria nesta fundação. Só fica acessível no
+      # host local para um reverse proxy TLS/autenticado; nunca publique 8000 na internet.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
 
   worker:
     restart: unless-stopped

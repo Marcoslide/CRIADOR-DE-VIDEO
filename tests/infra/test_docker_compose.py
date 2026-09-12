@@ -79,3 +79,4 @@ def test_prod_overlay_works_with_real_credentials_and_keeps_db_ports_unpublished
     assert services["postgres"]["environment"]["POSTGRES_PASSWORD"] == "prodpass123"
     assert "ports" not in services["postgres"]
     assert "ports" not in services["redis"]
+    assert services["api"]["ports"][0]["host_ip"] == "127.0.0.1"

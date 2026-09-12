@@ -3,6 +3,7 @@ respx (intercepta o httpx de verdade, não é um stub à parte). Nenhum destes t
 integração real com o Google Drive — isso é `test_google_drive_integration.py`.
 """
 
+import asyncio
 import json
 
 import httpx
@@ -167,6 +168,26 @@ async def test_resolve_path_missing_nested_without_create_raises(provider) -> No
         await provider._resolve_path(["03_AVATAR_IDENTITY_FOTOS", "lia"], create_missing=False)
 
 
+async def test_create_path_resolution_is_serialized_within_process(provider, monkeypatch) -> None:
+    active = 0
+    peak = 0
+
+    async def fake_unlocked(segments, *, create_missing):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return "folder-id"
+
+    monkeypatch.setattr(provider, "_resolve_path_unlocked", fake_unlocked)
+    await asyncio.gather(
+        provider._resolve_path(["03_AVATAR_IDENTITY_FOTOS", "a"], create_missing=True),
+        provider._resolve_path(["03_AVATAR_IDENTITY_FOTOS", "b"], create_missing=True),
+    )
+    assert peak == 1
+
+
 # ------------------------------------------------------------------ upload
 
 
@@ -280,6 +301,66 @@ async def test_upload_overwrites_existing_file_via_patch(provider, tmp_path, mon
 
     assert init_route.called
     assert entry.provider_id == "existing-id"
+
+
+# ------------------------------------------------------------------ download / sync safety
+
+
+async def test_download_failure_preserves_existing_destination(provider, tmp_path, monkeypatch):
+    async def fake_resolve(segments, *, create_missing):
+        return "parent-id"
+
+    async def fake_find(parent_id, filename):
+        return _file("remote-id", filename)
+
+    async def failing_stream(client, token, file_id):
+        yield b"conteudo parcial"
+        raise httpx.ReadError("conexão interrompida")
+
+    monkeypatch.setattr(provider, "_resolve_path", fake_resolve)
+    monkeypatch.setattr(provider, "_find_file", fake_find)
+    monkeypatch.setattr("dhf_storage.google_drive.drive_api.download_stream", failing_stream)
+
+    destination = tmp_path / "avatar.png"
+    destination.write_bytes(b"versao integra anterior")
+
+    with pytest.raises(httpx.ReadError):
+        await provider.download("03_AVATAR_IDENTITY_FOTOS/avatar.png", str(destination))
+
+    assert destination.read_bytes() == b"versao integra anterior"
+    assert list(tmp_path.glob("*.part")) == []
+
+
+async def test_sync_rejects_missing_local_directory(provider, tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="não existe"):
+        await provider.sync(str(tmp_path / "ausente"), "03_AVATAR_IDENTITY_FOTOS/avatar")
+
+
+async def test_sync_rejects_local_file(provider, tmp_path) -> None:
+    local_file = tmp_path / "nao-e-diretorio.txt"
+    local_file.write_text("x")
+    with pytest.raises(NotADirectoryError, match="não é um diretório"):
+        await provider.sync(str(local_file), "03_AVATAR_IDENTITY_FOTOS/avatar")
+
+
+@pytest.mark.parametrize(
+    "remote_path",
+    [
+        "03_AVATAR_IDENTITY_FOTOS/../segredo.txt",
+        "03_AVATAR_IDENTITY_FOTOS//arquivo.png",
+        "03_AVATAR_IDENTITY_FOTOS/./arquivo.png",
+    ],
+)
+def test_remote_path_rejects_ambiguous_segments(remote_path) -> None:
+    from dhf_storage.google_drive import GoogleDriveStorageProvider
+
+    with pytest.raises(ValueError, match="segmento inválido"):
+        GoogleDriveStorageProvider._split(remote_path)
+
+
+async def test_list_rejects_ambiguous_prefix(provider) -> None:
+    with pytest.raises(ValueError, match="segmento inválido"):
+        await provider.list("03_AVATAR_IDENTITY_FOTOS/../segredos")
 
 
 # ------------------------------------------------------------------ delete (proteção)

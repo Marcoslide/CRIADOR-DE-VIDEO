@@ -3,13 +3,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from dhf_avatars.router import router as avatars_router
 from dhf_shared.config import get_settings
 from dhf_shared.logging import configure_logging, get_logger
 from dhf_storage.factory import get_storage_provider
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import health, storage
+from app.routers import health, jobs, storage, system_status
 
 
 @asynccontextmanager
@@ -39,6 +40,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(storage.router)
+    app.include_router(system_status.router)
+    app.include_router(jobs.router)
+    app.include_router(avatars_router)
     return app
 
 

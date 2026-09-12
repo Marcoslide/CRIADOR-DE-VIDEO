@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "dhf-api",
+    "dhf-avatars",
     "dhf-job-worker",
     "dhf-schemas",
     "dhf-shared",
@@ -543,22 +544,41 @@ name = "dhf-api"
 version = "0.1.0"
 source = { virtual = "apps/api" }
 dependencies = [
+    { name = "dhf-avatars" },
     { name = "dhf-schemas" },
     { name = "dhf-shared" },
     { name = "dhf-storage" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "dhf-avatars", editable = "core/avatars" },
     { name = "dhf-schemas", editable = "packages/schemas" },
     { name = "dhf-shared", editable = "packages/shared" },
     { name = "dhf-storage", editable = "services/storage" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "redis", specifier = ">=5.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
+name = "dhf-avatars"
+version = "0.1.0"
+source = { editable = "core/avatars" }
+dependencies = [
+    { name = "dhf-shared" },
+    { name = "fastapi" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dhf-shared", editable = "packages/shared" },
+    { name = "fastapi", specifier = ">=0.115" },
 ]
 
 [[package]]

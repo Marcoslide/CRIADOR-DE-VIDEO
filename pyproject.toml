@@ -15,6 +15,7 @@ members = [
     "packages/schemas",
     "workers/job_worker",
     "services/storage",
+    "core/avatars",
 ]
 
 [dependency-groups]

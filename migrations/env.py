@@ -5,6 +5,11 @@ nunca hardcoded — o mesmo `.env` usado pela API define o alvo das migrations.
 from logging.config import fileConfig
 
 from alembic import context
+
+# Cada domínio de core/<dominio>/models.py precisa ser importado aqui para que suas
+# tabelas entrem em Base.metadata (e portanto no autogenerate/target_metadata abaixo) —
+# mesmo que a migration em si seja escrita à mão, como as demais deste projeto.
+from dhf_avatars.models import AvatarRecord  # noqa: F401
 from dhf_shared.config import get_settings
 from dhf_shared.db import Base
 from sqlalchemy import engine_from_config, pool
@@ -17,9 +22,6 @@ if config.config_file_name is not None:
 settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_url_sync)
 
-# Metadata alvo do autogenerate. Vazio na Fase 1 (nenhum modelo de domínio ainda) —
-# populado a partir da Fase 3 conforme os modelos de core/<dominio>/models.py forem
-# importados aqui.
 target_metadata = Base.metadata
 
 

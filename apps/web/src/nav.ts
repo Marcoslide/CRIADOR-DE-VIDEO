@@ -29,7 +29,7 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", path: "/", icon: LayoutDashboard, phase: "1", implemented: true },
-  { label: "Avatars", path: "/avatars", icon: UserSquare2, phase: 3, implemented: false },
+  { label: "Avatars", path: "/avatars", icon: UserSquare2, phase: 3, implemented: true },
   { label: "Voice Bank", path: "/voices", icon: Mic, phase: 4, implemented: false },
   { label: "Motion Bank", path: "/motions", icon: PersonStanding, phase: 4, implemented: false },
   { label: "Products", path: "/products", icon: Boxes, phase: 4, implemented: false },

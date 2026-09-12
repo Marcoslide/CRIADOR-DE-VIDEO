@@ -26,7 +26,11 @@ class Base(DeclarativeBase):
 @lru_cache
 def get_engine() -> AsyncEngine:
     settings = get_settings()
-    return create_async_engine(settings.database_url, pool_pre_ping=True)
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        connect_args={"timeout": settings.database_connect_timeout_s},
+    )
 
 
 @lru_cache

@@ -544,6 +544,7 @@ name = "dhf-api"
 version = "0.1.0"
 source = { virtual = "apps/api" }
 dependencies = [
+    { name = "celery", extra = ["redis"] },
     { name = "dhf-avatars" },
     { name = "dhf-schemas" },
     { name = "dhf-shared" },
@@ -551,11 +552,13 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "redis" },
+    { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "celery", extras = ["redis"], specifier = ">=5.4" },
     { name = "dhf-avatars", editable = "core/avatars" },
     { name = "dhf-schemas", editable = "packages/schemas" },
     { name = "dhf-shared", editable = "packages/shared" },
@@ -563,6 +566,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "redis", specifier = ">=5.0" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -573,12 +577,16 @@ source = { editable = "core/avatars" }
 dependencies = [
     { name = "dhf-shared" },
     { name = "fastapi" },
+    { name = "pydantic" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "dhf-shared", editable = "packages/shared" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
 ]
 
 [[package]]
@@ -619,6 +627,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
 ]
@@ -632,6 +641,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "redis", specifier = ">=5.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.4" },
 ]

@@ -6,6 +6,7 @@ se o caminho/URL configurado existe de verdade — nunca um "connected" hardcode
 """
 
 import asyncio
+import contextlib
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -100,7 +101,16 @@ async def check_gpu() -> GpuStatus:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except TimeoutError:
+            # wait_for cancela communicate(), mas não encerra o subprocesso. Sem este
+            # reap, cada consulta ao Dashboard poderia deixar um nvidia-smi órfão.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(OSError):
+                await proc.communicate()
+            raise
         if proc.returncode != 0:
             _logger.error("system_status.gpu_check_failed", stderr=stderr.decode(errors="replace"))
             return GpuStatus(

@@ -43,6 +43,7 @@ class AvatarCreate(BaseModel):
 
 
 class AvatarUpdate(BaseModel):
+    expected_version: int = Field(ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=200)
     metadata: dict[str, Any] | None = None
     status: AvatarStatus | None = None

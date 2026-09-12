@@ -13,13 +13,23 @@ from datetime import datetime
 from typing import Any
 
 from dhf_shared.db import Base
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import CheckConstraint, DateTime, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 
 class AvatarRecord(Base):
     __tablename__ = "avatars"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_avatars_version_positive"),
+        CheckConstraint(
+            "status IN ('draft', 'identity_locked', 'multiview_in_progress', "
+            "'multiview_approved', 'mesh_in_progress', 'mesh_approved', 'rigged', "
+            "'materials_approved', 'face_approved', 'voice_approved', "
+            "'motion_approved', 'master_approved', 'production_ready')",
+            name="ck_avatars_status_valid",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()

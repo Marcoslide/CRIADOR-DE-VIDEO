@@ -43,4 +43,5 @@ testpaths = ["tests"]
 markers = [
     "integration: testes reais contra serviços externos (skip automático sem credencial)",
     "requires_services: precisa de Postgres/Redis/worker reais rodando (não é unitário)",
+    "requires_worker_offline: precisa de Redis real rodando e worker deliberadamente parado",
 ]

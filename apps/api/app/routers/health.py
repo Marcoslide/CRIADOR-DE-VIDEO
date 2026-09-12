@@ -10,6 +10,7 @@ vai só para o log estruturado via `dhf_shared.logging`; a resposta HTTP leva ap
 `error_code`/mensagem sanitizados de `dhf_shared.errors.sanitize_error`.
 """
 
+import asyncio
 import time
 from datetime import UTC, datetime
 
@@ -56,7 +57,7 @@ async def check_worker() -> ComponentCheck:
         return result.get(timeout=5)
 
     try:
-        payload = await run_in_threadpool(_round_trip)
+        payload = await asyncio.wait_for(run_in_threadpool(_round_trip), timeout=8)
         return ComponentCheck(
             name="celery_worker",
             status="connected",
@@ -98,7 +99,11 @@ async def check_postgres() -> ComponentCheck:
 async def check_redis() -> ComponentCheck:
     start = time.perf_counter()
     settings = get_settings()
-    client = redis_asyncio.from_url(settings.redis_url)
+    client = redis_asyncio.from_url(
+        settings.redis_url,
+        socket_connect_timeout=settings.redis_connect_timeout_s,
+        socket_timeout=settings.redis_socket_timeout_s,
+    )
     try:
         await client.ping()
         return ComponentCheck(name="redis", status="connected", latency_ms=_elapsed_ms(start))

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from dhf_avatars.router import router as avatars_router
 from dhf_shared.config import get_settings
+from dhf_shared.db import get_engine
 from dhf_shared.logging import configure_logging, get_logger
 from dhf_storage.factory import get_storage_provider
 from fastapi import FastAPI
@@ -19,9 +20,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level, service="api")
     logger = get_logger(service="api")
     logger.info("api.startup", app_env=settings.app_env)
-    yield
-    await get_storage_provider().aclose()
-    logger.info("api.shutdown")
+    try:
+        yield
+    finally:
+        try:
+            await get_storage_provider().aclose()
+        finally:
+            await get_engine().dispose()
+            logger.info("api.shutdown")
 
 
 def create_app() -> FastAPI:

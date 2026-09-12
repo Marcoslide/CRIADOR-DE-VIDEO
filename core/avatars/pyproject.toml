@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "dhf-shared",
     "fastapi>=0.115",
+    "pydantic>=2.9",
+    "sqlalchemy>=2.0",
 ]
 
 [tool.uv.sources]

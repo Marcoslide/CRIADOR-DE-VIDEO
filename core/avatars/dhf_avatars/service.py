@@ -21,6 +21,10 @@ class InvalidStatusTransitionError(Exception):
         super().__init__(f"transição {current} -> {target} não é permitida")
 
 
+class AvatarDeleteBlockedError(Exception):
+    """Evita apagar fisicamente um avatar que já entrou no pipeline produtivo."""
+
+
 def _to_schema(record: AvatarRecord) -> Avatar:
     return Avatar(
         id=record.id,
@@ -50,8 +54,11 @@ async def get_avatar(avatar_id: uuid.UUID) -> Avatar:
 
 
 async def update_avatar(avatar_id: uuid.UUID, payload: AvatarUpdate) -> Avatar:
+    current = await repository.get_avatar(avatar_id)
+    if current.version != payload.expected_version:
+        raise repository.AvatarVersionConflictError(avatar_id, payload.expected_version)
+
     if payload.status is not None:
-        current = await repository.get_avatar(avatar_id)
         current_status = AvatarStatus(current.status)
         if (
             payload.status != current_status
@@ -59,10 +66,31 @@ async def update_avatar(avatar_id: uuid.UUID, payload: AvatarUpdate) -> Avatar:
         ):
             raise InvalidStatusTransitionError(current_status, payload.status)
 
+    status = payload.status.value if payload.status is not None else None
+    changed = any(
+        (
+            payload.name is not None and payload.name != current.name,
+            payload.metadata is not None and payload.metadata != current.avatar_metadata,
+            status is not None and status != current.status,
+        )
+    )
+    if not changed:
+        return _to_schema(current)
+
     record = await repository.update_avatar(
         avatar_id,
         name=payload.name,
         metadata=payload.metadata,
-        status=payload.status.value if payload.status is not None else None,
+        status=status,
+        expected_version=payload.expected_version,
     )
     return _to_schema(record)
+
+
+async def delete_avatar(avatar_id: uuid.UUID, *, expected_version: int) -> None:
+    current = await repository.get_avatar(avatar_id)
+    if current.version != expected_version:
+        raise repository.AvatarVersionConflictError(avatar_id, expected_version)
+    if AvatarStatus(current.status) != AvatarStatus.DRAFT:
+        raise AvatarDeleteBlockedError
+    await repository.delete_avatar(avatar_id, expected_version=expected_version)

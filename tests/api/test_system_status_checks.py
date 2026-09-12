@@ -6,7 +6,9 @@ caminho/URL configurado) isoladamente. A maioria não precisa de Postgres/Redis/
 
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 from app.routers.system_status import check_gpu, check_openai, check_render_engine
 
 
@@ -17,6 +19,49 @@ async def test_check_gpu_reports_not_configured_without_nvidia_smi(
     status = await check_gpu()
     assert status.status == "not_configured"
     assert status.device_name is None
+
+
+async def test_check_gpu_kills_and_reaps_timed_out_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.communicate_calls = 0
+
+        def communicate(self):
+            self.communicate_calls += 1
+
+            async def done():
+                return b"", b""
+
+            return done()
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    async def fake_wait_for(awaitable, *, timeout):
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr("app.routers.system_status.shutil.which", lambda _: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(
+        "app.routers.system_status.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+    monkeypatch.setattr("app.routers.system_status.asyncio.wait_for", fake_wait_for)
+
+    status = await check_gpu()
+
+    assert status.status == "error"
+    assert process.killed is True
+    assert process.communicate_calls == 2
 
 
 async def test_check_openai_reports_not_configured_without_key(
@@ -32,16 +77,17 @@ async def test_check_openai_reports_not_configured_without_key(
     assert status.detail == "OPENAI_API_KEY não configurada"
 
 
-@pytest.mark.requires_services
+@respx.mock
 async def test_check_openai_reports_error_on_invalid_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Confirma, com uma chamada HTTP real à OpenAI, que uma chave configurada mas
-    inválida gera ERROR de verdade — nunca CONNECTED sem checar (regra ZERO FAKE).
-    Marcado requires_services porque depende de rede externa real, não só de lógica local."""
+    """Uma resposta 401 realista prova o ramo sem tornar o CI dependente da internet."""
     from dhf_shared.config import Settings
 
     monkeypatch.setattr(
         "app.routers.system_status.get_settings",
         lambda: Settings(openai_api_key="sk-invalid-test-key-not-real"),
+    )
+    respx.get("https://api.openai.com/v1/models").mock(
+        return_value=httpx.Response(401, json={"error": {"message": "invalid key"}})
     )
     status = await check_openai()
     assert status.status == "error"

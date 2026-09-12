@@ -4,6 +4,7 @@ sem Docker"). Sem mocks: enfileira de verdade e espera o worker processar.
 """
 
 import asyncio
+import uuid
 from datetime import datetime
 
 import httpx
@@ -45,3 +46,49 @@ async def test_diagnostic_job_round_trips_through_redis_and_worker(
     assert _parse(body["result"]["triggered_at"]) == _parse(submitted["triggered_at"])
     assert body["result"]["processed_at"]
     assert _parse(body["result"]["processed_at"]) >= _parse(body["result"]["triggered_at"])
+
+
+async def test_nonexistent_diagnostic_job_returns_404(client: httpx.AsyncClient) -> None:
+    response = await client.get(f"/jobs/diagnostic/{uuid.uuid4()}")
+    assert response.status_code == 404
+
+
+async def test_malformed_diagnostic_job_id_returns_422(client: httpx.AsyncClient) -> None:
+    response = await client.get("/jobs/diagnostic/not-a-uuid")
+    assert response.status_code == 422
+
+
+async def test_submit_reports_503_when_redis_is_unavailable(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dhf_shared.config import Settings
+
+    monkeypatch.setattr(
+        "app.routers.jobs.get_settings",
+        lambda: Settings(redis_host="localhost", redis_port=1),
+    )
+    response = await client.post("/jobs/diagnostic")
+    assert response.status_code == 503
+    assert "localhost" not in response.json()["detail"]
+
+
+async def test_failed_job_is_reported_without_leaking_result(
+    client: httpx.AsyncClient,
+) -> None:
+    import redis.asyncio as redis_asyncio
+    from dhf_shared.celery_app import celery_app
+    from dhf_shared.config import get_settings
+
+    job_id = str(uuid.uuid4())
+    settings = get_settings()
+    redis_client = redis_asyncio.from_url(settings.redis_url)
+    try:
+        await redis_client.set(f"dhf:diagnostic-job:{job_id}", "1", ex=60)
+        celery_app.backend.store_result(job_id, "falha controlada", state="FAILURE")
+
+        response = await client.get(f"/jobs/diagnostic/{job_id}")
+        assert response.status_code == 200
+        assert response.json() == {"job_id": job_id, "state": "failure", "result": None}
+    finally:
+        await redis_client.delete(f"dhf:diagnostic-job:{job_id}")
+        await redis_client.aclose()

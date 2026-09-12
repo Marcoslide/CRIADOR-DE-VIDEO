@@ -4,6 +4,7 @@ sem Docker"). Sem mocks: cada teste cria linhas de verdade no banco e confirma q
 persistem — inclusive através de um "restart" simulado do processo.
 """
 
+import asyncio
 import uuid
 
 import httpx
@@ -70,6 +71,17 @@ async def test_duplicate_slug_returns_409(client: httpx.AsyncClient) -> None:
     assert second.status_code == 409
 
 
+async def test_concurrent_duplicate_slug_returns_one_created_and_one_conflict(
+    client: httpx.AsyncClient,
+) -> None:
+    slug = _unique_slug("teste-corrida-slug")
+    responses = await asyncio.gather(
+        client.post("/avatars", json={"name": "Concorrente A", "slug": slug, "metadata": {}}),
+        client.post("/avatars", json={"name": "Concorrente B", "slug": slug, "metadata": {}}),
+    )
+    assert sorted(response.status_code for response in responses) == [201, 409]
+
+
 async def test_update_metadata_bumps_version(client: httpx.AsyncClient) -> None:
     slug = _unique_slug("teste-metadata")
     created = (
@@ -77,7 +89,10 @@ async def test_update_metadata_bumps_version(client: httpx.AsyncClient) -> None:
     ).json()
     assert created["version"] == 1
 
-    response = await client.patch(f"/avatars/{created['id']}", json={"metadata": {"v": 2}})
+    response = await client.patch(
+        f"/avatars/{created['id']}",
+        json={"metadata": {"v": 2}, "expected_version": created["version"]},
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["version"] == 2
@@ -93,9 +108,35 @@ async def test_update_with_unchanged_metadata_does_not_bump_version(
         await client.post("/avatars", json={"name": "Estável", "slug": slug, "metadata": {"v": 1}})
     ).json()
 
-    response = await client.patch(f"/avatars/{created['id']}", json={"metadata": {"v": 1}})
+    response = await client.patch(
+        f"/avatars/{created['id']}",
+        json={"metadata": {"v": 1}, "expected_version": created["version"]},
+    )
     assert response.status_code == 200
     assert response.json()["version"] == 1
+
+
+async def test_stale_update_returns_409_instead_of_overwriting(client: httpx.AsyncClient) -> None:
+    slug = _unique_slug("teste-versao-obsoleta")
+    created = (
+        await client.post("/avatars", json={"name": "Original", "slug": slug, "metadata": {}})
+    ).json()
+    first = await client.patch(
+        f"/avatars/{created['id']}",
+        json={"name": "Primeira edição", "expected_version": created["version"]},
+    )
+    assert first.status_code == 200
+    assert first.json()["version"] == 2
+
+    stale = await client.patch(
+        f"/avatars/{created['id']}",
+        json={"name": "Edição obsoleta", "expected_version": created["version"]},
+    )
+    assert stale.status_code == 409
+
+    current = (await client.get(f"/avatars/{created['id']}")).json()
+    assert current["name"] == "Primeira edição"
+    assert current["version"] == 2
 
 
 async def test_valid_status_transition_advances_one_step(client: httpx.AsyncClient) -> None:
@@ -105,7 +146,10 @@ async def test_valid_status_transition_advances_one_step(client: httpx.AsyncClie
     ).json()
     assert created["status"] == "draft"
 
-    response = await client.patch(f"/avatars/{created['id']}", json={"status": "identity_locked"})
+    response = await client.patch(
+        f"/avatars/{created['id']}",
+        json={"status": "identity_locked", "expected_version": created["version"]},
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "identity_locked"
@@ -120,13 +164,49 @@ async def test_invalid_status_transition_returns_409(client: httpx.AsyncClient) 
         await client.post("/avatars", json={"name": "Pulador", "slug": slug, "metadata": {}})
     ).json()
 
-    response = await client.patch(f"/avatars/{created['id']}", json={"status": "production_ready"})
+    response = await client.patch(
+        f"/avatars/{created['id']}",
+        json={"status": "production_ready", "expected_version": created["version"]},
+    )
     assert response.status_code == 409
 
 
 async def test_update_nonexistent_avatar_returns_404(client: httpx.AsyncClient) -> None:
-    response = await client.patch(f"/avatars/{uuid.uuid4()}", json={"name": "Fantasma"})
+    response = await client.patch(
+        f"/avatars/{uuid.uuid4()}", json={"name": "Fantasma", "expected_version": 1}
+    )
     assert response.status_code == 404
+
+
+async def test_delete_draft_avatar(client: httpx.AsyncClient) -> None:
+    slug = _unique_slug("teste-delete")
+    created = (
+        await client.post("/avatars", json={"name": "Temporário", "slug": slug, "metadata": {}})
+    ).json()
+
+    deleted = await client.delete(
+        f"/avatars/{created['id']}", params={"expected_version": created["version"]}
+    )
+    assert deleted.status_code == 204
+    assert (await client.get(f"/avatars/{created['id']}")).status_code == 404
+
+
+async def test_delete_non_draft_avatar_is_blocked(client: httpx.AsyncClient) -> None:
+    slug = _unique_slug("teste-delete-bloqueado")
+    created = (
+        await client.post("/avatars", json={"name": "Em uso", "slug": slug, "metadata": {}})
+    ).json()
+    advanced = (
+        await client.patch(
+            f"/avatars/{created['id']}",
+            json={"status": "identity_locked", "expected_version": created["version"]},
+        )
+    ).json()
+
+    response = await client.delete(
+        f"/avatars/{created['id']}", params={"expected_version": advanced["version"]}
+    )
+    assert response.status_code == 409
 
 
 async def test_avatar_survives_simulated_process_restart(client: httpx.AsyncClient) -> None:
@@ -144,7 +224,10 @@ async def test_avatar_survives_simulated_process_restart(client: httpx.AsyncClie
         )
     ).json()
     updated = (
-        await client.patch(f"/avatars/{created['id']}", json={"status": "identity_locked"})
+        await client.patch(
+            f"/avatars/{created['id']}",
+            json={"status": "identity_locked", "expected_version": created["version"]},
+        )
     ).json()
     assert updated["version"] == 2
 

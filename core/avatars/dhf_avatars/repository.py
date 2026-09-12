@@ -7,7 +7,8 @@ import uuid
 from typing import Any
 
 from dhf_shared.db import get_sessionmaker
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from dhf_avatars.models import AvatarRecord
 
@@ -24,6 +25,13 @@ class AvatarSlugConflictError(Exception):
         super().__init__(f"slug '{slug}' já em uso")
 
 
+class AvatarVersionConflictError(Exception):
+    def __init__(self, avatar_id: uuid.UUID, expected_version: int) -> None:
+        self.avatar_id = avatar_id
+        self.expected_version = expected_version
+        super().__init__(f"avatar {avatar_id} foi alterado depois da versão {expected_version}")
+
+
 async def create_avatar(name: str, slug: str, metadata: dict[str, Any]) -> AvatarRecord:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -32,7 +40,13 @@ async def create_avatar(name: str, slug: str, metadata: dict[str, Any]) -> Avata
             raise AvatarSlugConflictError(slug)
         record = AvatarRecord(name=name, slug=slug, avatar_metadata=metadata)
         session.add(record)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            # A restrição UNIQUE do banco é a autoridade final. O pre-check acima melhora
+            # a mensagem no caso comum; este catch cobre duas criações concorrentes.
+            raise AvatarSlugConflictError(slug) from exc
         await session.refresh(record)
         return record
 
@@ -61,24 +75,57 @@ async def update_avatar(
     name: str | None = None,
     metadata: dict[str, Any] | None = None,
     status: str | None = None,
+    expected_version: int,
 ) -> AvatarRecord:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        record = await session.get(AvatarRecord, avatar_id)
+        values: dict[str, Any] = {
+            "version": AvatarRecord.version + 1,
+            "updated_at": func.now(),
+        }
+        if name is not None:
+            values["name"] = name
+        if metadata is not None:
+            values["avatar_metadata"] = metadata
+        if status is not None:
+            values["status"] = status
+
+        statement = (
+            update(AvatarRecord)
+            .where(
+                AvatarRecord.id == avatar_id,
+                AvatarRecord.version == expected_version,
+            )
+            .values(**values)
+            .returning(AvatarRecord)
+        )
+        record = (await session.execute(statement)).scalar_one_or_none()
         if record is None:
-            raise AvatarNotFoundError(avatar_id)
-        changed = False
-        if name is not None and name != record.name:
-            record.name = name
-            changed = True
-        if metadata is not None and metadata != record.avatar_metadata:
-            record.avatar_metadata = metadata
-            changed = True
-        if status is not None and status != record.status:
-            record.status = status
-            changed = True
-        if changed:
-            record.version += 1
+            exists = await session.scalar(
+                select(AvatarRecord.id).where(AvatarRecord.id == avatar_id)
+            )
+            if exists is None:
+                raise AvatarNotFoundError(avatar_id)
+            raise AvatarVersionConflictError(avatar_id, expected_version)
         await session.commit()
-        await session.refresh(record)
         return record
+
+
+async def delete_avatar(avatar_id: uuid.UUID, *, expected_version: int) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        deleted_id = await session.scalar(
+            delete(AvatarRecord)
+            .where(
+                AvatarRecord.id == avatar_id,
+                AvatarRecord.version == expected_version,
+                AvatarRecord.status == "draft",
+            )
+            .returning(AvatarRecord.id)
+        )
+        if deleted_id is None:
+            existing = await session.get(AvatarRecord, avatar_id)
+            if existing is None:
+                raise AvatarNotFoundError(avatar_id)
+            raise AvatarVersionConflictError(avatar_id, expected_version)
+        await session.commit()

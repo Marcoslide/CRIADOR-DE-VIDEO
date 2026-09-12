@@ -3,6 +3,7 @@
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 
 class Settings(BaseSettings):
@@ -20,13 +21,17 @@ class Settings(BaseSettings):
     postgres_db: str = "dhf"
     postgres_user: str = "dhf"
     postgres_password: str = "dhf"
+    database_connect_timeout_s: float = 5
 
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
+    redis_connect_timeout_s: float = 2
+    redis_socket_timeout_s: float = 5
 
     celery_broker_url: str = ""
     celery_result_backend: str = ""
+    diagnostic_job_ttl_s: int = 86400
 
     api_cors_origins: list[str] = ["http://localhost:5173"]
 
@@ -44,18 +49,26 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """URL assíncrona (asyncpg) — usada pela aplicação (FastAPI)."""
-        return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        return URL.create(
+            "postgresql+asyncpg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        ).render_as_string(hide_password=False)
 
     @property
     def database_url_sync(self) -> str:
         """URL síncrona (psycopg) — usada pelo Alembic."""
-        return (
-            f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        return URL.create(
+            "postgresql+psycopg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        ).render_as_string(hide_password=False)
 
     @property
     def redis_url(self) -> str:

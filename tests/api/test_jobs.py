@@ -84,7 +84,7 @@ async def test_failed_job_is_reported_without_leaking_result(
     redis_client = redis_asyncio.from_url(settings.redis_url)
     try:
         await redis_client.set(f"dhf:diagnostic-job:{job_id}", "1", ex=60)
-        celery_app.backend.store_result(job_id, "falha controlada", state="FAILURE")
+        celery_app.backend.store_result(job_id, RuntimeError("falha controlada"), state="FAILURE")
 
         response = await client.get(f"/jobs/diagnostic/{job_id}")
         assert response.status_code == 200

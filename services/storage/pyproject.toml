@@ -1,0 +1,27 @@
+[project]
+name = "dhf-storage"
+version = "0.1.0"
+description = "Digital Human Factory — GoogleDriveStorageProvider real (implementa StorageProvider)"
+requires-python = ">=3.11"
+dependencies = [
+    "dhf-shared",
+    "dhf-schemas",
+    "google-auth>=2.35",
+    "requests>=2.32",
+    "httpx>=0.27",
+    "aiofiles>=24.1",
+]
+
+[tool.uv.sources]
+dhf-shared = { workspace = true }
+dhf-schemas = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dhf_storage"]
+
+[project.scripts]
+dhf-storage = "dhf_storage.cli:main"

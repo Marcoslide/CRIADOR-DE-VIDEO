@@ -1,0 +1,40 @@
+# Overlay de PRODUÇÃO — uso explícito, nunca carregado sozinho:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Postgres e Redis propositalmente NÃO publicam porta nenhuma aqui — só alcançáveis pela
+# rede interna do Compose (api/worker os acessam por nome de serviço). Credenciais vêm só
+# do .env real do nó (ou de um secret manager) — as guardas ${VAR:?...} abaixo são o que
+# recusa subir sem POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB definidos (o arquivo base
+# não tem guarda nenhuma: sua interpolação acontece antes do merge com este overlay, então
+# uma guarda lá disparia mesmo em dev, antes do docker-compose.override.yml ter a chance
+# de fornecer seu default).
+
+services:
+  postgres:
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD — nunca use um valor padrão em produção}
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB}
+
+  redis:
+    restart: unless-stopped
+
+  api:
+    restart: unless-stopped
+    ports:
+      # A API ainda não tem autenticação própria nesta fundação. Só fica acessível no
+      # host local para um reverse proxy TLS/autenticado; nunca publique 8000 na internet.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+
+  worker:
+    restart: unless-stopped
+
+  web:
+    build:
+      target: production
+      args:
+        VITE_API_URL: "${VITE_API_URL:?defina VITE_API_URL (ex. https://api.seudominio.com) antes do build de producao}"
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"

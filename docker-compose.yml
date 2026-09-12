@@ -1,0 +1,90 @@
+# Base — ambiente-agnóstica, sem porta de banco/cache publicada. Não tem valor padrão de
+# credencial nem guarda ${VAR:?...} — quem decide isso é quem carrega este arquivo:
+#
+#   Dev:  `docker compose up --build`
+#         (carrega docker-compose.override.yml automaticamente — credenciais de
+#         desenvolvimento, portas locais, servidor Vite; funciona sem .env)
+#   Prod: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`
+#         (sem override — docker-compose.prod.yml é quem exige POSTGRES_USER/PASSWORD/DB
+#         via ${VAR:?...} e recusa subir com um valor padrão fraco; Postgres/Redis nunca
+#         publicados, build estático + nginx)
+#
+# Importante: a interpolação de ${VAR} de CADA arquivo acontece antes do merge entre eles
+# — uma guarda ${VAR:?...} aqui no base dispararia mesmo em dev, antes do override ter a
+# chance de fornecer seu default. Por isso a guarda só existe no overlay de produção.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      # Sem guarda ${VAR:?...} aqui de propósito: a interpolação do arquivo base acontece
+      # ANTES do merge com docker-compose.override.yml/docker-compose.prod.yml, então uma
+      # guarda aqui dispararia mesmo em dev (onde o override forneceria um default) — ela
+      # fica só no overlay de produção, que é o único carregado sem o override.
+      POSTGRES_USER: ${POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    env_file:
+      # Opcional: sem isso, `env_file: [.env]` exige o arquivo existir e quebra
+      # `docker compose up --build` num checkout limpo (sem .env). Se .env existir
+      # (`cp .env.example .env`), continua sendo lido normalmente.
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    env_file:
+      # Opcional: sem isso, `env_file: [.env]` exige o arquivo existir e quebra
+      # `docker compose up --build` num checkout limpo (sem .env). Se .env existir
+      # (`cp .env.example .env`), continua sendo lido normalmente.
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+
+volumes:
+  postgres_data:

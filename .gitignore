@@ -1,0 +1,33 @@
+# Segredos
+.env
+!.env.example
+apps/web/.env
+!apps/web/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+uv-cache/
+
+# Node / frontend
+node_modules/
+apps/web/dist/
+*.tsbuildinfo
+apps/web/vite.config.js
+apps/web/vite.config.d.ts
+
+# Build / artefatos
+dist/
+build/
+*.log
+dump.rdb
+
+# SO / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

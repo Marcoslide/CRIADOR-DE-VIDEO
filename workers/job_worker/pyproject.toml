@@ -1,0 +1,15 @@
+[project]
+name = "dhf-job-worker"
+version = "0.1.0"
+description = "Digital Human Factory — worker Celery de jobs gerais (não-GPU)"
+requires-python = ">=3.11"
+dependencies = [
+    "dhf-shared",
+    "celery[redis]>=5.4",
+]
+
+[tool.uv.sources]
+dhf-shared = { workspace = true }
+
+[tool.uv]
+package = false

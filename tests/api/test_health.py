@@ -5,20 +5,10 @@ via as variáveis de ambiente de `.env` (ver README.md "Rodando sem Docker"). N�
 mocks: o objetivo é provar que a fundação sobe de ponta a ponta de verdade.
 """
 
-from collections.abc import AsyncIterator
-
 import httpx
 import pytest
-from app.main import app
 
 pytestmark = pytest.mark.requires_services
-
-
-@pytest.fixture
-async def client() -> AsyncIterator[httpx.AsyncClient]:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
 
 
 async def test_health_liveness(client: httpx.AsyncClient) -> None:

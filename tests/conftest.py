@@ -4,13 +4,26 @@ conseguirem `from app.main import app`, adicionamos apps/api ao sys.path aqui.
 """
 
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 
 API_ROOT = Path(__file__).resolve().parents[1] / "apps" / "api"
 if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
+
+
+@pytest.fixture
+async def client() -> AsyncIterator[httpx.AsyncClient]:
+    """Cliente HTTP contra a app ASGI real (sem subir um servidor de verdade) — usado por
+    todo teste marcado requires_services que fala com a API."""
+    from app.main import app
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
 
 
 @pytest.fixture(autouse=True)

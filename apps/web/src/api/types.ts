@@ -8,6 +8,7 @@ export interface ComponentCheck {
   status: ComponentStatus;
   latency_ms: number | null;
   detail: string | null;
+  error_code: string | null;
 }
 
 export interface HealthResponse {
@@ -37,6 +38,7 @@ export interface TreeValidationResult {
 export interface StorageStatus {
   status: StorageConnectionStatus;
   detail: string | null;
+  error_code: string | null;
   root_folder_id: string | null;
   tree: TreeValidationResult | null;
   checked_at: string;

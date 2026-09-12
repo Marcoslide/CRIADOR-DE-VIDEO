@@ -4,18 +4,18 @@ import { NAV_ITEMS } from "../nav";
 
 export function Sidebar() {
   return (
-    <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-base-700 bg-base-900">
-      <div className="px-5 py-6">
+    <aside className="flex w-full shrink-0 flex-col border-b border-base-700 bg-base-900 md:h-screen md:w-64 md:border-b-0 md:border-r">
+      <div className="px-4 py-3 md:px-5 md:py-6">
         <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
           Digital Human
         </p>
         <p className="text-lg font-semibold text-slate-50">Video Factory</p>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-4">
-        <ul className="space-y-0.5">
+      <nav className="overflow-x-auto px-3 pb-3 md:flex-1 md:overflow-x-hidden md:overflow-y-auto md:pb-4">
+        <ul className="flex gap-1 md:block md:space-y-0.5">
           {NAV_ITEMS.map((item) => (
-            <li key={item.path}>
+            <li key={item.path} className="shrink-0">
               <NavLink
                 to={item.path}
                 end={item.path === "/"}
@@ -43,7 +43,7 @@ export function Sidebar() {
         </ul>
       </nav>
 
-      <div className="border-t border-base-700 px-5 py-4 text-[11px] text-slate-600">
+      <div className="hidden border-t border-base-700 px-5 py-4 text-[11px] text-slate-600 md:block">
         Hostinger GPU Node · RTX 5090
       </div>
     </aside>

@@ -67,9 +67,13 @@ export function Avatars() {
     mutationFn: (avatar: Avatar) => {
       const target = nextStatus(avatar.status);
       if (!target) throw new Error("já está em production_ready");
-      return api.updateAvatarStatus(avatar.id, target);
+      return api.updateAvatarStatus(avatar.id, target, avatar.version);
     },
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["avatars"] }),
+    onSuccess: () => {
+      setFormError(null);
+      void queryClient.invalidateQueries({ queryKey: ["avatars"] });
+    },
+    onError: (error: Error) => setFormError(error.message),
   });
 
   return (
@@ -80,7 +84,10 @@ export function Avatars() {
           className="mt-3 flex flex-wrap items-end gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!name.trim()) return;
+            if (!name.trim() || !slugify(name)) {
+              setFormError("O nome precisa conter ao menos uma letra sem acento ou número.");
+              return;
+            }
             createMutation.mutate();
           }}
         >
@@ -90,7 +97,7 @@ export function Avatars() {
             </label>
             <input
               id="avatar-name"
-              className="mt-1 w-64 rounded-md border border-base-700 bg-base-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-sky-500"
+              className="mt-1 w-full rounded-md border border-base-700 bg-base-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-sky-500 sm:w-64"
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="Ana Executiva"
@@ -101,7 +108,7 @@ export function Avatars() {
           )}
           <button
             type="submit"
-            disabled={!name.trim() || createMutation.isPending}
+            disabled={!name.trim() || !slugify(name) || createMutation.isPending}
             className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {createMutation.isPending ? "Criando…" : "Criar avatar"}

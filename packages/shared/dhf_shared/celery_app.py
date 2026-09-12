@@ -37,3 +37,17 @@ celery_app = _build_celery_app()
 @celery_app.task(name="health.ping")
 def ping() -> dict:
     return {"pong": True, "ts": datetime.now(UTC).isoformat()}
+
+
+@celery_app.task(name="system.diagnostic_job")
+def diagnostic_job(triggered_at: str) -> dict:
+    """Job mínimo de diagnóstico: prova de ponta a ponta API -> Redis -> Worker.
+
+    `triggered_at` é o timestamp de quando a API enfileirou o job (não de agora) — quem
+    consome o resultado consegue comparar os dois timestamps e ver o round-trip real.
+    """
+    return {
+        "status": "OK",
+        "triggered_at": triggered_at,
+        "processed_at": datetime.now(UTC).isoformat(),
+    }

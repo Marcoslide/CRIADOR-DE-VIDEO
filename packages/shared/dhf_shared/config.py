@@ -30,6 +30,17 @@ class Settings(BaseSettings):
 
     api_cors_origins: list[str] = ["http://localhost:5173"]
 
+    # ---- Fase 5 — Director AI (OpenAI) ------------------------------------------------
+    # Vazio = NOT_CONFIGURED honesto (ver app.routers.system_status). Nunca simula conexão.
+    openai_api_key: str = ""
+
+    # ---- Fase 7 — Unreal / Audio2Face / MetaHuman (engines de render) -----------------
+    # Cada um é NOT_INSTALLED até o caminho/URL apontar para uma instalação real existente
+    # (checagem real de arquivo/processo em app.routers.system_status, nunca hardcoded).
+    unreal_engine_path: str = ""
+    audio2face_path: str = ""
+    metahuman_api_url: str = ""
+
     @property
     def database_url(self) -> str:
         """URL assíncrona (asyncpg) — usada pela aplicação (FastAPI)."""

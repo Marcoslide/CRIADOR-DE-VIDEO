@@ -36,13 +36,19 @@ async def health() -> HealthResponse:
 
 @router.get("/health/ready", response_model=ReadinessResponse)
 async def readiness() -> ReadinessResponse:
-    checks = [await _check_postgres(), await _check_redis()]
+    checks = [await check_postgres(), await check_redis()]
     ready = all(check.status == "connected" for check in checks)
     return ReadinessResponse(ready=ready, checks=checks, checked_at=datetime.now(UTC))
 
 
 @router.get("/health/worker", response_model=ComponentCheck)
 async def worker_health() -> ComponentCheck:
+    return await check_worker()
+
+
+async def check_worker() -> ComponentCheck:
+    """Round-trip real via Celery — reusado por /health/worker e por
+    app.routers.system_status (endpoint agregado consumido pelo Dashboard)."""
     start = time.perf_counter()
 
     def _round_trip() -> dict:
@@ -70,7 +76,7 @@ async def worker_health() -> ComponentCheck:
         )
 
 
-async def _check_postgres() -> ComponentCheck:
+async def check_postgres() -> ComponentCheck:
     start = time.perf_counter()
     try:
         engine = get_engine()
@@ -89,7 +95,7 @@ async def _check_postgres() -> ComponentCheck:
         )
 
 
-async def _check_redis() -> ComponentCheck:
+async def check_redis() -> ComponentCheck:
     start = time.perf_counter()
     settings = get_settings()
     client = redis_asyncio.from_url(settings.redis_url)

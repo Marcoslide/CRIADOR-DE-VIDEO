@@ -8,6 +8,7 @@ dependencies = [
     "dhf-schemas",
     "dhf-storage",
     "dhf-avatars",
+    "dhf-avatar-factory",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "celery[redis]>=5.4",
@@ -21,6 +22,7 @@ dhf-shared = { workspace = true }
 dhf-schemas = { workspace = true }
 dhf-storage = { workspace = true }
 dhf-avatars = { workspace = true }
+dhf-avatar-factory = { workspace = true }
 
 [tool.uv]
 package = false

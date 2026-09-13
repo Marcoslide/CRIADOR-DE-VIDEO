@@ -16,6 +16,7 @@ members = [
     "workers/job_worker",
     "services/storage",
     "core/avatars",
+    "core/avatar_factory",
 ]
 
 [dependency-groups]
@@ -36,6 +37,13 @@ extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+# B008 (function-call-in-default-argument) já exclui `fastapi.Query`/`fastapi.Depends` quando o
+# parâmetro é um escalar builtin (str/int/...), mas não reconhece isso para um StrEnum próprio
+# (ex.: ReferenceAssetCategory) nem para `File(...)` com UploadFile — daí o extend explícito
+# abaixo, em vez de espalhar `# noqa: B008` pelos routers.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Form", "fastapi.File", "fastapi.Query"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

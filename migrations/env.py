@@ -9,6 +9,15 @@ from alembic import context
 # Cada domínio de core/<dominio>/models.py precisa ser importado aqui para que suas
 # tabelas entrem em Base.metadata (e portanto no autogenerate/target_metadata abaixo) —
 # mesmo que a migration em si seja escrita à mão, como as demais deste projeto.
+from dhf_avatar_factory.models import (  # noqa: F401
+    AvatarStateTransitionRecord,
+    DerivedAssetRecord,
+    IdentityLockRecord,
+    JobContractRecord,
+    QualityGateDecisionRecord,
+    QualityGateRecord,
+    ReferenceAssetRecord,
+)
 from dhf_avatars.models import AvatarRecord  # noqa: F401
 from dhf_shared.config import get_settings
 from dhf_shared.db import Base

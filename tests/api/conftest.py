@@ -30,6 +30,7 @@ from PIL import Image
 
 AdvanceToIdentityLocked = Callable[[httpx.AsyncClient, dict], Awaitable[dict]]
 CompleteFullMultiview = Callable[[httpx.AsyncClient, dict], Awaitable[dict]]
+UploadFullMultiviewSet = Callable[[httpx.AsyncClient, str], Awaitable[None]]
 
 
 class FakeStorageProvider:
@@ -131,29 +132,43 @@ async def _upload_and_approve(
 
 
 @pytest.fixture
-def complete_full_multiview_and_approve() -> CompleteFullMultiview:
-    async def _complete(client: httpx.AsyncClient, avatar: dict) -> dict:
-        """Avatar já em MULTIVIEW_IN_PROGRESS -> sobe TODOS os 108 ângulos 360° + 32
-        especializadas + 19 expressões, aprova cada um, e então aprova o gate multiview
-        de verdade. Sem isso não existe outro jeito de alcançar MULTIVIEW_APPROVED
-        (P1-1) — é deliberadamente pesado, exatamente o que "sem bypass" custa."""
+def upload_and_approve_full_multiview_set() -> UploadFullMultiviewSet:
+    async def _upload_all(client: httpx.AsyncClient, avatar_id: str) -> None:
+        """Sobe TODOS os 108 ângulos 360° + 32 especializadas + 19 expressões e aprova
+        cada um — deixa a evidência 100% satisfeita SEM aprovar o gate multiview em si
+        (usado tanto por `complete_full_multiview_and_approve` quanto por testes que
+        precisam de evidência completa para correr uma corrida real contra o approve)."""
         seed = 0
         for category in ("head_360", "half_body_360", "full_body_360"):
             for angle in REQUIRED_ANGLES:
                 seed += 1
                 await _upload_and_approve(
-                    client, avatar["id"], category=category, angle=angle, seed=seed
+                    client, avatar_id, category=category, angle=angle, seed=seed
                 )
         for category in SPECIALIZED_CATEGORIES:
             seed += 1
             await _upload_and_approve(
-                client, avatar["id"], category=category.value, angle=None, seed=seed
+                client, avatar_id, category=category.value, angle=None, seed=seed
             )
         for category in EXPRESSION_CATEGORIES:
             seed += 1
             await _upload_and_approve(
-                client, avatar["id"], category=category.value, angle=None, seed=seed
+                client, avatar_id, category=category.value, angle=None, seed=seed
             )
+
+    return _upload_all
+
+
+@pytest.fixture
+def complete_full_multiview_and_approve(
+    upload_and_approve_full_multiview_set: UploadFullMultiviewSet,
+) -> CompleteFullMultiview:
+    async def _complete(client: httpx.AsyncClient, avatar: dict) -> dict:
+        """Avatar já em MULTIVIEW_IN_PROGRESS -> sobe o conjunto completo de evidência e
+        aprova o gate multiview de verdade. Sem isso não existe outro jeito de alcançar
+        MULTIVIEW_APPROVED (P1-1) — é deliberadamente pesado, exatamente o que "sem
+        bypass" custa."""
+        await upload_and_approve_full_multiview_set(client, avatar["id"])
 
         response = await client.post(
             f"/avatars/{avatar['id']}/quality-gates/multiview/approve",

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         AdvanceToIdentityLocked,
         CompleteFullMultiview,
         FakeStorageProvider,
+        UploadFullMultiviewSet,
     )
 
 pytestmark = pytest.mark.requires_services
@@ -405,3 +406,415 @@ async def test_new_identity_version_does_not_touch_gates_on_first_approval(
     # Nenhum gate foi tocado ainda — a lista fica vazia até o primeiro approve/list.
     gates = (await client.get(f"/avatars/{avatar['id']}/quality-gates")).json()
     assert all(g["avatar_version_group"] == 1 for g in gates)
+
+
+# --- P1-6/P1-6b/P1-7/P1-8/P1-9/P2 — hardening antes da auditoria independente ---------------
+#
+# Os 8 cenários adversariais abaixo são os exigidos explicitamente para este round: cada
+# um prova, com Postgres real (nunca mock), que a janela de corrida ou o estado
+# "impossível" correspondente NÃO existe mais.
+
+
+async def test_concurrent_evidence_rejection_and_gate_approval_never_leave_stale_pass(
+    client: httpx.AsyncClient,
+    advance_to_identity_locked: AdvanceToIdentityLocked,
+    upload_and_approve_full_multiview_set: UploadFullMultiviewSet,
+    fake_storage_provider: FakeStorageProvider,
+) -> None:
+    """Cenário adversarial #1 (P1-6 — TOCTOU): evidência 100% satisfeita, mas uma
+    rejeição concorrente altera essa evidência exatamente no momento em que o approve do
+    gate roda. Antes do P1-6, `service.approve_gate` lia `satisfied=True` FORA da
+    transação e confiava nesse booleano pré-computado; hoje a mesma transação que decide
+    é a que locka e lê a evidência (`repository.approve_gate_atomic` ->
+    `_check_gate_requirements_locked`), e a rejeição concorrente também locka o avatar
+    primeiro (mesma ordem universal de lock — ver `repository.py`). Não existe mais
+    entrelaçamento parcial possível: ou o approve termina 100% antes da rejeição começar
+    (e a rejeição então acha o gate PASS e invalida em cascata — P1-6b), ou a rejeição
+    termina primeiro e o approve enxerga a evidência já insuficiente e falha. Em NENHUM
+    caso o gate fica permanentemente 'pass' com evidência atual insuficiente."""
+    import asyncio
+
+    avatar = await _create_avatar(client, "toctou-corrida-evidencia")
+    identity_locked = await advance_to_identity_locked(client, avatar)
+    in_progress = (
+        await client.patch(
+            f"/avatars/{avatar['id']}",
+            json={
+                "status": "multiview_in_progress",
+                "expected_version": identity_locked["version"],
+            },
+        )
+    ).json()
+    await upload_and_approve_full_multiview_set(client, avatar["id"])
+
+    references = (
+        await client.get(f"/avatars/{avatar['id']}/references", params={"category": "head_360"})
+    ).json()
+    target = next(r for r in references if r["angle"] == 0)
+
+    reject_response, approve_response = await asyncio.gather(
+        client.post(
+            f"/avatars/{avatar['id']}/references/{target['id']}/reject",
+            json={
+                "expected_version": target["version"],
+                "reason": "identity_drift",
+                "reviewed_by": "marcos",
+            },
+        ),
+        client.post(
+            f"/avatars/{avatar['id']}/quality-gates/multiview/approve",
+            json={"expected_version": in_progress["version"], "actor": "marcos"},
+        ),
+    )
+
+    assert reject_response.status_code == 200
+    assert approve_response.status_code in (200, 409)
+
+    final_gate = next(
+        g
+        for g in (await client.get(f"/avatars/{avatar['id']}/quality-gates")).json()
+        if g["gate_name"] == "multiview"
+    )
+    # A rejeição é permanente nesse teste (sem recaptura) — não importa a ordem em que as
+    # duas operações concorrentes foram serializadas pelo Postgres, o gate nunca pode
+    # terminar 'pass' com evidência atual insuficiente.
+    assert final_gate["status"] != "pass"
+
+    final_avatar = (await client.get(f"/avatars/{avatar['id']}")).json()
+    assert final_avatar["status"] == "multiview_in_progress"
+
+
+async def test_rejecting_evidence_after_multiview_pass_cascades_invalidation(
+    client: httpx.AsyncClient,
+    advance_to_identity_locked: AdvanceToIdentityLocked,
+    complete_full_multiview_and_approve: CompleteFullMultiview,
+    fake_storage_provider: FakeStorageProvider,
+) -> None:
+    """Cenário adversarial #2 (P1-6b — opção B, evidência mutável): um reference asset
+    que era evidência de um MULTIVIEW já PASS sendo rejeitado DEPOIS invalida o gate e
+    todo downstream, e reposiciona o avatar — nunca sobrevive um estado "gate caiu,
+    avatar continua MULTIVIEW_APPROVED"."""
+    avatar = await _create_avatar(client, "cascata-multiview-pass")
+    identity_locked = await advance_to_identity_locked(client, avatar)
+    in_progress = (
+        await client.patch(
+            f"/avatars/{avatar['id']}",
+            json={
+                "status": "multiview_in_progress",
+                "expected_version": identity_locked["version"],
+            },
+        )
+    ).json()
+    await complete_full_multiview_and_approve(client, in_progress)
+
+    gates_before = (await client.get(f"/avatars/{avatar['id']}/quality-gates")).json()
+    assert next(g for g in gates_before if g["gate_name"] == "multiview")["status"] == "pass"
+
+    references = (
+        await client.get(f"/avatars/{avatar['id']}/references", params={"category": "head_360"})
+    ).json()
+    target = next(r for r in references if r["angle"] == 0)
+
+    rejection = await client.post(
+        f"/avatars/{avatar['id']}/references/{target['id']}/reject",
+        json={
+            "expected_version": target["version"],
+            "reason": "identity_drift",
+            "reviewed_by": "marcos",
+        },
+    )
+    assert rejection.status_code == 200
+
+    gates_after = (await client.get(f"/avatars/{avatar['id']}/quality-gates")).json()
+    multiview_after = next(g for g in gates_after if g["gate_name"] == "multiview")
+    assert multiview_after["status"] == "fail"
+
+    reset_avatar = (await client.get(f"/avatars/{avatar['id']}")).json()
+    assert reset_avatar["status"] == "multiview_in_progress"
+
+    history = (await client.get(f"/avatars/{avatar['id']}/history")).json()
+    cascade_transitions = [t for t in history if "invalidação em cascata" in (t["reason"] or "")]
+    assert len(cascade_transitions) == 1
+    assert cascade_transitions[0]["from_status"] == "multiview_approved"
+    assert cascade_transitions[0]["to_status"] == "multiview_in_progress"
+    assert cascade_transitions[0]["quality_gate"] == "multiview"
+
+
+async def test_identity_v2_approval_resets_status_away_from_production_ready(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    advance_to_identity_locked: AdvanceToIdentityLocked,
+    complete_full_multiview_and_approve: CompleteFullMultiview,
+    fake_storage_provider: FakeStorageProvider,
+) -> None:
+    """Cenário adversarial #3 (P1-7 + readiness fail-closed): um avatar genuinamente
+    PRODUCTION_READY (os 9 gates obrigatórios 'pass' de verdade) não pode sobreviver como
+    PRODUCTION_READY depois que uma NOVA identidade é aprovada — nem `AvatarRecord.status`
+    nem `readiness.production_ready`. Mesh/rig/materials/face/voice/motion/master nunca
+    passam de verdade nesta V1 (seção 39, Zero Mock) — para isolar e testar só o
+    MECANISMO de reset (não fingir que a GPU existe), só o booleano de satisfação de
+    `check_gpu_dependent_gate` é estubado aqui; toda a transação de aprovação (lock,
+    escrita, avanço de status) roda de verdade contra o Postgres."""
+    import dhf_avatar_factory.gate_requirements as gate_requirements_module
+    from dhf_avatar_factory.schemas import GateRequirementCheck
+
+    avatar = await _create_avatar(client, "producao-reset-identity-v2")
+    identity_locked = await advance_to_identity_locked(client, avatar)
+    in_progress = (
+        await client.patch(
+            f"/avatars/{avatar['id']}",
+            json={
+                "status": "multiview_in_progress",
+                "expected_version": identity_locked["version"],
+            },
+        )
+    ).json()
+    current = await complete_full_multiview_and_approve(client, in_progress)
+
+    def _always_satisfied(gate_name, derived_assets):  # noqa: ANN001, ARG001
+        return GateRequirementCheck(gate_name=gate_name, satisfied=True, missing=[])
+
+    monkeypatch.setattr(gate_requirements_module, "check_gpu_dependent_gate", _always_satisfied)
+
+    current = (
+        await client.patch(
+            f"/avatars/{avatar['id']}",
+            json={"status": "mesh_in_progress", "expected_version": current["version"]},
+        )
+    ).json()
+    for gate in ("mesh", "rig", "materials", "face", "voice", "motion", "master", "production"):
+        response = await client.post(
+            f"/avatars/{avatar['id']}/quality-gates/{gate}/approve",
+            json={"expected_version": current["version"], "actor": "marcos"},
+        )
+        assert response.status_code == 200, response.text
+        current = (await client.get(f"/avatars/{avatar['id']}")).json()
+
+    assert current["status"] == "production_ready"
+    readiness = (await client.get(f"/avatars/{avatar['id']}/readiness")).json()
+    assert readiness["production_ready"] is True
+
+    monkeypatch.undo()  # a aprovação de identidade v2 abaixo não deve depender do estub
+
+    draft_v2 = (
+        await client.post(
+            f"/avatars/{avatar['id']}/identity-lock", json={"identity_spec": {}, "notes": "v2"}
+        )
+    ).json()
+    assert draft_v2["identity_version"] == 2
+    approve_v2 = await client.post(
+        f"/avatars/{avatar['id']}/identity-lock/approve",
+        json={"expected_version": draft_v2["version"], "approved_by": "marcos"},
+    )
+    assert approve_v2.status_code == 200
+
+    reset_avatar = (await client.get(f"/avatars/{avatar['id']}")).json()
+    assert reset_avatar["status"] == "draft"
+
+    reset_readiness = (await client.get(f"/avatars/{avatar['id']}/readiness")).json()
+    assert reset_readiness["production_ready"] is False
+    assert reset_readiness["status"] == "draft"
+    assert set(reset_readiness["missing"]) == {
+        "identity",
+        "multiview",
+        "mesh",
+        "rig",
+        "materials",
+        "face",
+        "voice",
+        "motion",
+        "master",
+    }
+
+
+async def test_identity_v2_never_silently_reuses_v1_job_contracts(
+    client: httpx.AsyncClient, advance_to_identity_locked: AdvanceToIdentityLocked
+) -> None:
+    """Cenário adversarial #4 (P1-8 — lineage de job contract): trocar de geração de
+    identidade nunca reaproveita silenciosamente os job contracts de uma geração
+    anterior — um conjunto NOVO é criado para v2, e o conjunto de v1 permanece intacto
+    como histórico (nunca apagado, nunca reescrito)."""
+    import dhf_avatar_factory.repository as repo_module
+
+    avatar = await _create_avatar(client, "job-contracts-lineage")
+    await advance_to_identity_locked(client, avatar)
+
+    contracts_v1 = (await client.get(f"/avatars/{avatar['id']}/job-contracts")).json()
+    assert len(contracts_v1) == 8
+    assert all(c["avatar_version_group"] == 1 for c in contracts_v1)
+    v1_ids = {c["id"] for c in contracts_v1}
+
+    draft_v2 = (
+        await client.post(
+            f"/avatars/{avatar['id']}/identity-lock", json={"identity_spec": {}, "notes": "v2"}
+        )
+    ).json()
+    approve_v2 = await client.post(
+        f"/avatars/{avatar['id']}/identity-lock/approve",
+        json={"expected_version": draft_v2["version"], "approved_by": "marcos"},
+    )
+    assert approve_v2.status_code == 200
+
+    contracts_now = (await client.get(f"/avatars/{avatar['id']}/job-contracts")).json()
+    assert len(contracts_now) == 8
+    assert all(c["avatar_version_group"] == 2 for c in contracts_now)
+    v2_ids = {c["id"] for c in contracts_now}
+    assert v1_ids.isdisjoint(v2_ids)  # v2 nunca é a MESMA linha reaproveitada de v1
+
+    stale_v1_records = await repo_module.list_job_contracts(
+        uuid.UUID(avatar["id"]), version_group=1
+    )
+    assert {str(r.id) for r in stale_v1_records} == v1_ids  # v1 continua intacto
+    assert all(r.avatar_version_group == 1 for r in stale_v1_records)
+    assert all(r.status == "blocked" for r in stale_v1_records)  # nunca reescrito
+
+
+async def test_concurrent_identity_v2_draft_creation_never_duplicates(
+    client: httpx.AsyncClient, advance_to_identity_locked: AdvanceToIdentityLocked
+) -> None:
+    """Cenário adversarial #5 (P1-9 — concorrência real): duas requisições concorrentes
+    criando o primeiro draft de identity_version=2 para o MESMO avatar nunca resultam em
+    duas linhas — o lock do avatar serializa a corrida e, mesmo que o lock falhasse por
+    algum motivo, a UNIQUE constraint do banco (migration 0006) garante isso de
+    qualquer forma. Não confiamos só no código Python: contamos as linhas direto no
+    banco."""
+    import asyncio
+
+    from dhf_avatar_factory.models import IdentityLockRecord
+    from dhf_shared.db import get_sessionmaker
+    from sqlalchemy import func, select
+
+    avatar = await _create_avatar(client, "identity-v2-corrida")
+    await advance_to_identity_locked(client, avatar)  # v1 approved
+
+    payload = {"identity_spec": {}, "notes": "corrida v2"}
+    responses = await asyncio.gather(
+        client.post(f"/avatars/{avatar['id']}/identity-lock", json=payload),
+        client.post(f"/avatars/{avatar['id']}/identity-lock", json=payload),
+    )
+
+    assert all(r.status_code in (201, 409) for r in responses)
+    assert any(r.status_code == 201 for r in responses)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(IdentityLockRecord)
+            .where(
+                IdentityLockRecord.avatar_id == uuid.UUID(avatar["id"]),
+                IdentityLockRecord.identity_version == 2,
+            )
+        )
+    assert count == 1
+
+
+async def test_concurrent_derived_asset_placeholder_creation_never_duplicates(
+    client: httpx.AsyncClient,
+) -> None:
+    """Cenário adversarial #6 (P1-9): duas requisições concorrentes pedindo os
+    placeholders de DerivedAsset da mesma geração pela primeira vez nunca duplicam —
+    deve existir exatamente 1 linha por (avatar, geração, tipo), nunca 2, confirmado
+    direto no banco (não só pela resposta da API)."""
+    import asyncio
+
+    from dhf_avatar_factory.models import DerivedAssetRecord
+    from dhf_shared.db import get_sessionmaker
+    from sqlalchemy import func, select
+
+    avatar = await _create_avatar(client, "derived-assets-corrida")
+
+    responses = await asyncio.gather(
+        client.get(f"/avatars/{avatar['id']}/derived-assets"),
+        client.get(f"/avatars/{avatar['id']}/derived-assets"),
+    )
+    for response in responses:
+        assert response.status_code == 200
+        assert len(response.json()) == 12  # um por DerivedAssetType
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(DerivedAssetRecord)
+            .where(
+                DerivedAssetRecord.avatar_id == uuid.UUID(avatar["id"]),
+                DerivedAssetRecord.avatar_version_group == 1,
+            )
+        )
+    assert count == 12
+
+
+async def test_concurrent_job_contract_placeholder_creation_never_duplicates(
+    client: httpx.AsyncClient,
+) -> None:
+    """Cenário adversarial #7 (P1-9): mesma garantia do teste anterior, agora para
+    JobContract — duas requisições concorrentes pedindo os contratos padrão da mesma
+    geração pela primeira vez nunca duplicam."""
+    import asyncio
+
+    from dhf_avatar_factory.models import JobContractRecord
+    from dhf_shared.db import get_sessionmaker
+    from sqlalchemy import func, select
+
+    avatar = await _create_avatar(client, "job-contracts-corrida")
+
+    responses = await asyncio.gather(
+        client.get(f"/avatars/{avatar['id']}/job-contracts"),
+        client.get(f"/avatars/{avatar['id']}/job-contracts"),
+    )
+    for response in responses:
+        assert response.status_code == 200
+        assert len(response.json()) == 8  # um por JobContractType
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(JobContractRecord)
+            .where(
+                JobContractRecord.avatar_id == uuid.UUID(avatar["id"]),
+                JobContractRecord.avatar_version_group == 1,
+            )
+        )
+    assert count == 8
+
+
+async def test_reference_content_proxy_cleans_up_tempfile_on_storage_download_failure(
+    client: httpx.AsyncClient,
+    fake_storage_provider: FakeStorageProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cenário adversarial #8 (P2 — cleanup de tempfile): se o download do Storage
+    falhar, o tempfile já criado por `tempfile.mkstemp` não pode vazar — o content proxy
+    é chamado a cada carregamento do viewer 360, e um Storage instável (timeout, 5xx,
+    credencial expirada) não pode ir enchendo o disco a cada tentativa."""
+    import io
+    from pathlib import Path
+
+    from PIL import Image
+
+    avatar = await _create_avatar(client, "content-proxy-cleanup")
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), color=(120, 120, 120)).save(buffer, format="PNG")
+    uploaded = (
+        await client.post(
+            f"/avatars/{avatar['id']}/references",
+            data={"category": "face_front_neutral"},
+            files={"file": ("ref.png", buffer.getvalue(), "image/png")},
+        )
+    ).json()
+
+    created_paths: list[str] = []
+
+    async def _boom_download(remote_path: str, local_path: str) -> None:
+        created_paths.append(local_path)
+        raise RuntimeError("falha simulada de download do Storage")
+
+    monkeypatch.setattr(fake_storage_provider, "download", _boom_download)
+
+    with pytest.raises(RuntimeError, match="falha simulada"):
+        await client.get(f"/avatars/{avatar['id']}/references/{uploaded['id']}/content")
+
+    assert len(created_paths) == 1
+    assert not Path(created_paths[0]).exists()

@@ -17,10 +17,21 @@ from pydantic import BaseModel
 
 class StorageConnectionStatus(StrEnum):
     NOT_CONFIGURED = "not_configured"
+    AUTH_EXPIRED = "auth_expired"
     CONNECTING = "connecting"
     CONNECTED = "connected"
     DEGRADED = "degraded"
     ERROR = "error"
+
+
+class StorageAuthMode(StrEnum):
+    SERVICE_ACCOUNT = "service_account"
+    OAUTH_USER = "oauth_user"
+
+
+class StorageDriveKind(StrEnum):
+    MY_DRIVE = "my_drive"
+    SHARED_DRIVE = "shared_drive"
 
 
 class TreeValidationResult(BaseModel):
@@ -39,6 +50,8 @@ class StorageStatus(BaseModel):
     detail: str | None = None
     error_code: str | None = None
     root_folder_id: str | None = None
+    auth_mode: StorageAuthMode | None = None
+    drive_kind: StorageDriveKind | None = None
     tree: TreeValidationResult | None = None
     checked_at: datetime
 
@@ -71,6 +84,18 @@ class StorageNotConfiguredError(StorageError):
 
 class StoragePermanentDeleteBlockedError(StorageError):
     """delete() fora da área de scratch exige allow_permanent=True explícito."""
+
+
+class StorageIntegrityError(StorageError):
+    """O checksum retornado pelo provider diverge do conteúdo local."""
+
+
+class StorageAuthExpiredError(StorageError):
+    """A autorização OAuth expirou/revogada e exige novo consentimento humano."""
+
+
+class StorageRootNotBootstrappedError(StorageError):
+    """A credencial existe, mas a root gerenciada ainda não foi criada/recuperada."""
 
 
 class StorageProvider(Protocol):

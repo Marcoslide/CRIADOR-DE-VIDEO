@@ -1,7 +1,7 @@
 """Árvore oficial de pastas do Google Drive.
 
-Criada manualmente pelo usuário — o provider NUNCA cria, renomeia ou apaga estas 18 pastas
-de topo, só descobre por nome e valida que existem. Ver docs/STORAGE_GOOGLE_DRIVE.md.
+O bootstrap cria idempotentemente as 18 pastas sob a root marcada pelo aplicativo. As
+operações normais nunca renomeiam nem apagam essas pastas. Ver docs/STORAGE_GOOGLE_DRIVE.md.
 """
 
 from dhf_schemas.storage import TreeValidationResult
@@ -27,17 +27,22 @@ OFFICIAL_TOP_LEVEL_FOLDERS: list[str] = [
     "17_FUTURO_LIVE",
 ]
 
-# Única área onde delete() sem allow_permanent=True é permitido (e ali, move para a
-# lixeira do Drive, nunca exclusão definitiva). Fora daqui, delete() exige
-# allow_permanent=True e então é definitivo. Ver GoogleDriveStorageProvider.delete().
+# Áreas onde delete() sem allow_permanent=True é permitido (e ali, move para a
+# lixeira do Drive, nunca exclusão definitiva). ``_integration_tests`` é uma pasta
+# interna criada sob a root apenas quando a suíte real é executada; ela não integra
+# as 18 pastas oficiais.
 SCRATCH_PREFIX = "02_SISTEMA_STORAGE/_tmp"
+INTEGRATION_TESTS_PREFIX = "_integration_tests"
+SAFE_TRASH_PREFIXES = (SCRATCH_PREFIX, INTEGRATION_TESTS_PREFIX)
 
 
 def validate_tree(found_names: list[str]) -> TreeValidationResult:
     found_set = set(found_names)
     expected_set = set(OFFICIAL_TOP_LEVEL_FOLDERS)
     missing = [name for name in OFFICIAL_TOP_LEVEL_FOLDERS if name not in found_set]
-    unexpected = sorted(found_set - expected_set)
+    # A pasta interna de integração é conhecida e não representa drift da árvore
+    # oficial. Pastas realmente desconhecidas continuam aparecendo no diagnóstico.
+    unexpected = sorted(found_set - expected_set - {INTEGRATION_TESTS_PREFIX})
     return TreeValidationResult(
         expected=OFFICIAL_TOP_LEVEL_FOLDERS,
         found=sorted(found_set & expected_set),
@@ -49,4 +54,7 @@ def validate_tree(found_names: list[str]) -> TreeValidationResult:
 
 def is_within_scratch(remote_path: str) -> bool:
     normalized = remote_path.strip("/")
-    return normalized == SCRATCH_PREFIX or normalized.startswith(SCRATCH_PREFIX + "/")
+    return any(
+        normalized == prefix or normalized.startswith(prefix + "/")
+        for prefix in SAFE_TRASH_PREFIXES
+    )

@@ -3,9 +3,9 @@
 Regras de segurança que este módulo respeita à risca:
 - nunca loga o conteúdo de uma credencial, nem o access token;
 - nunca finge estar `CONNECTED` — get_status() faz uma chamada real (list_children na raiz);
-- nunca cria/renomeia/apaga uma das 18 pastas oficiais de topo, só descobre por nome;
-- delete() sem allow_permanent=True só age dentro de SCRATCH_PREFIX, e ali move para a
-  lixeira (recuperável) — nunca exclusão definitiva sem o caller pedir explicitamente.
+- somente bootstrap cria pastas oficiais ausentes; operações de arquivo nunca as alteram;
+- delete() sem allow_permanent=True só age em áreas de scratch conhecidas, e ali move
+  para a lixeira (recuperável) — nunca exclusão definitiva sem pedido explícito.
 """
 
 import asyncio
@@ -15,17 +15,21 @@ import mimetypes
 import os
 import tempfile
 import time
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import aiofiles
 import httpx
 from dhf_schemas.storage import (
+    StorageAuthExpiredError,
+    StorageAuthMode,
     StorageConnectionStatus,
+    StorageDriveKind,
+    StorageIntegrityError,
     StorageManifestEntry,
     StorageNotConfiguredError,
     StoragePermanentDeleteBlockedError,
+    StorageRootNotBootstrappedError,
     StorageStatus,
     SyncReport,
     TreeValidationResult,
@@ -37,15 +41,22 @@ from dhf_storage import drive_api
 from dhf_storage.auth import CredentialLoadError, ensure_fresh_token, load_credentials
 from dhf_storage.cache import FolderIdCache
 from dhf_storage.config import GoogleDriveSettings, get_google_drive_settings
-from dhf_storage.retry import RetryExhaustedError
+from dhf_storage.retry import RetryExhaustedError, with_retry
+from dhf_storage.state import RootState, RootStateError, load_root_state, save_root_state
 from dhf_storage.tree import (
+    INTEGRATION_TESTS_PREFIX,
     OFFICIAL_TOP_LEVEL_FOLDERS,
-    SCRATCH_PREFIX,
+    SAFE_TRASH_PREFIXES,
     is_within_scratch,
     validate_tree,
 )
 
 _UPLOAD_MIME_DEFAULT = "application/octet-stream"
+_NOT_CONFIGURED_DETAIL = "credencial Google Drive não configurada (OAuth User ou Service Account)"
+_AUTH_EXPIRED_DETAIL = (
+    "A autorização do Google Drive expirou ou foi revogada; execute o bootstrap OAuth novamente."
+)
+ROOT_APP_PROPERTIES = {"dhf_storage_root": "v1"}
 
 
 def _root_cause(exc: BaseException) -> BaseException:
@@ -65,9 +76,15 @@ class GoogleDriveStorageProvider:
         self._cache = FolderIdCache()
         self._client: httpx.AsyncClient | None = None
         self._credentials = None
+        self._auth_mode: StorageAuthMode | None = None
+        self._auth_expired = False
         self._credential_load_error: CredentialLoadError | None = None
+        self._root_folder_id: str | None = None
+        self._root_state_loaded = False
+        self._root_state_error: RootStateError | None = None
         self._status_cache: StorageStatus | None = None
         self._status_lock = asyncio.Lock()
+        self._bootstrap_lock = asyncio.Lock()
         # A Drive API não oferece "create folder if absent" atômico. Serializar a
         # resolução criadora evita pastas duplicadas entre uploads concorrentes deste
         # processo; coordenação entre múltiplos processos fica para a camada de jobs.
@@ -91,29 +108,34 @@ class GoogleDriveStorageProvider:
         if self._credentials is not None or self._credential_load_error is not None:
             return
         try:
-            self._credentials = load_credentials(self._settings)
+            loaded = load_credentials(self._settings)
+            if loaded is not None:
+                self._credentials = loaded.credentials
+                self._auth_mode = StorageAuthMode(loaded.mode.value)
         except CredentialLoadError as exc:
             self._credential_load_error = exc
             self._logger.error("storage.credential_load_error", error=str(exc))
 
     async def _get_token(self) -> str:
+        if self._auth_expired:
+            raise StorageAuthExpiredError(_AUTH_EXPIRED_DETAIL)
         self._load_credentials_once()
         if self._credential_load_error is not None:
             raise self._credential_load_error
         if self._credentials is None:
-            raise StorageNotConfiguredError(
-                "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON/_FILE não configurados"
-            )
-        return await asyncio.to_thread(ensure_fresh_token, self._credentials)
+            raise StorageNotConfiguredError(_NOT_CONFIGURED_DETAIL)
+        try:
+            return await asyncio.to_thread(ensure_fresh_token, self._credentials)
+        except StorageAuthExpiredError:
+            self._auth_expired = True
+            raise
 
     def _require_configured(self) -> None:
         self._load_credentials_once()
         if self._credential_load_error is not None:
             raise self._credential_load_error
         if self._credentials is None:
-            raise StorageNotConfiguredError(
-                "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON/_FILE não configurados"
-            )
+            raise StorageNotConfiguredError(_NOT_CONFIGURED_DETAIL)
 
     def _retry_kwargs(self) -> dict:
         return {
@@ -121,6 +143,158 @@ class GoogleDriveStorageProvider:
             "base_delay_s": self._settings.google_drive_retry_base_delay_s,
             "logger": self._logger,
         }
+
+    def _load_root_state_once(self) -> None:
+        if self._root_state_loaded:
+            return
+        self._root_state_loaded = True
+        if self._settings.google_drive_root_folder_id.strip():
+            self._root_folder_id = self._settings.google_drive_root_folder_id.strip()
+            return
+        try:
+            state = load_root_state(self._settings.root_state_path)
+        except RootStateError as exc:
+            self._root_state_error = exc
+            return
+        if state is not None:
+            if state.root_folder_name != self._settings.google_drive_root_folder_name:
+                self._root_state_error = RootStateError(
+                    "nome da root no state file diverge da configuração"
+                )
+                return
+            self._root_folder_id = state.root_folder_id
+
+    def _require_root_id(self) -> str:
+        self._load_root_state_once()
+        if self._root_state_error is not None:
+            raise self._root_state_error
+        if self._root_folder_id is None:
+            raise StorageRootNotBootstrappedError(
+                "root gerenciada ainda não foi criada; execute dhf-storage bootstrap"
+            )
+        return self._root_folder_id
+
+    @staticmethod
+    def _is_not_found(exc: BaseException) -> bool:
+        root = _root_cause(exc)
+        return isinstance(root, httpx.HTTPStatusError) and root.response.status_code == 404
+
+    def _validate_managed_root(self, metadata: dict) -> None:
+        if metadata.get("mimeType") != drive_api.FOLDER_MIME_TYPE:
+            raise RootStateError("o ID persistido da root não aponta para uma pasta")
+        if metadata.get("name") != self._settings.google_drive_root_folder_name:
+            raise RootStateError("o ID persistido aponta para uma pasta com nome inesperado")
+        properties = metadata.get("appProperties") or {}
+        if any(properties.get(key) != value for key, value in ROOT_APP_PROPERTIES.items()):
+            raise RootStateError("a pasta persistida não possui a marca da root gerenciada")
+
+    async def bootstrap(self) -> StorageStatus:
+        """Cria/recupera a root marcada e garante a árvore oficial de forma idempotente."""
+        self._require_configured()
+        async with self._bootstrap_lock:
+            client = await self._get_client()
+            token = await self._get_token()
+            self._load_root_state_once()
+            if self._root_state_error is not None:
+                raise self._root_state_error
+
+            root_id = self._root_folder_id
+            if root_id is not None:
+                try:
+                    metadata = await drive_api.get_file_metadata(
+                        client, token, root_id, **self._retry_kwargs()
+                    )
+                    self._validate_managed_root(metadata)
+                except Exception as exc:
+                    is_persisted_state = not bool(
+                        self._settings.google_drive_root_folder_id.strip()
+                    )
+                    if not is_persisted_state or not self._is_not_found(exc):
+                        raise
+                    root_id = None
+                    self._root_folder_id = None
+
+            if root_id is None:
+                state_path = self._settings.root_state_path
+                if state_path is None:
+                    raise RootStateError(
+                        "configure GOOGLE_DRIVE_ROOT_STATE_FILE ou OAUTH_USER_FILE "
+                        "antes do bootstrap"
+                    )
+                matches = await drive_api.list_children(
+                    client,
+                    token,
+                    "root",
+                    name=self._settings.google_drive_root_folder_name,
+                    folders_only=True,
+                    app_properties=ROOT_APP_PROPERTIES,
+                    **self._retry_kwargs(),
+                )
+                if len(matches) > 1:
+                    raise RootStateError(
+                        "mais de uma root marcada foi encontrada; intervenção manual necessária"
+                    )
+                if matches:
+                    root_id = matches[0]["id"]
+                    self._validate_managed_root(matches[0])
+                else:
+                    visible_name_matches = await drive_api.list_children(
+                        client,
+                        token,
+                        "root",
+                        name=self._settings.google_drive_root_folder_name,
+                        folders_only=True,
+                        **self._retry_kwargs(),
+                    )
+                    if visible_name_matches:
+                        raise RootStateError(
+                            "já existe uma pasta visível com o nome da root, mas sem a "
+                            "marca gerenciada; nenhuma nova root foi criada"
+                        )
+                    created = await drive_api.create_folder(
+                        client,
+                        token,
+                        "root",
+                        self._settings.google_drive_root_folder_name,
+                        app_properties=ROOT_APP_PROPERTIES,
+                        **self._retry_kwargs(),
+                    )
+                    root_id = created["id"]
+                self._root_folder_id = root_id
+                save_root_state(
+                    state_path,
+                    RootState(
+                        root_folder_id=root_id,
+                        root_folder_name=self._settings.google_drive_root_folder_name,
+                    ),
+                )
+
+            folders = await drive_api.list_children(
+                client,
+                token,
+                root_id,
+                folders_only=True,
+                **self._retry_kwargs(),
+            )
+            by_name: dict[str, list[dict]] = {}
+            for folder in folders:
+                by_name.setdefault(folder["name"], []).append(folder)
+            duplicates = [
+                name for name in OFFICIAL_TOP_LEVEL_FOLDERS if len(by_name.get(name, [])) > 1
+            ]
+            if duplicates:
+                raise RootStateError(
+                    "pastas oficiais duplicadas na root gerenciada: " + ", ".join(duplicates)
+                )
+            for name in OFFICIAL_TOP_LEVEL_FOLDERS:
+                if name not in by_name:
+                    await drive_api.create_folder(
+                        client, token, root_id, name, **self._retry_kwargs()
+                    )
+
+            self._cache.invalidate()
+            self._status_cache = None
+            return await self.get_status(force_refresh=True)
 
     @staticmethod
     def _split(remote_path: str) -> tuple[list[str], str]:
@@ -131,6 +305,11 @@ class GoogleDriveStorageProvider:
         if any(part in {"", ".", ".."} or "\x00" in part for part in raw_parts):
             raise ValueError("remote_path contém segmento inválido")
         parts = list(PurePosixPath(normalized).parts)
+        allowed_top_level = {*OFFICIAL_TOP_LEVEL_FOLDERS, INTEGRATION_TESTS_PREFIX}
+        if len(parts) < 2 or parts[0] not in allowed_top_level:
+            raise ValueError(
+                "remote_path deve apontar abaixo de uma pasta oficial ou da área interna de testes"
+            )
         return parts[:-1], parts[-1]
 
     async def _resolve_path(self, segments: list[str], *, create_missing: bool) -> str:
@@ -141,35 +320,45 @@ class GoogleDriveStorageProvider:
 
     async def _resolve_path_unlocked(self, segments: list[str], *, create_missing: bool) -> str:
         if not segments:
-            return self._settings.google_drive_root_folder_id
+            return self._require_root_id()
 
         top = segments[0]
-        if top not in OFFICIAL_TOP_LEVEL_FOLDERS:
+        if top not in {*OFFICIAL_TOP_LEVEL_FOLDERS, INTEGRATION_TESTS_PREFIX}:
             raise ValueError(
-                f"'{top}' não é uma das 18 pastas oficiais da árvore do Drive. "
-                f"Válidas: {OFFICIAL_TOP_LEVEL_FOLDERS}"
+                f"'{top}' não é uma pasta gerenciada da árvore do Drive. "
+                f"Válidas: {OFFICIAL_TOP_LEVEL_FOLDERS} e {INTEGRATION_TESTS_PREFIX}"
             )
 
         client = await self._get_client()
         token = await self._get_token()
 
+        root_id = self._require_root_id()
         parent_id = self._cache.get(top)
         if parent_id is None:
             matches = await drive_api.list_children(
                 client,
                 token,
-                self._settings.google_drive_root_folder_id,
+                root_id,
                 name=top,
                 folders_only=True,
+                shared_drive_id=self._settings.google_drive_shared_drive_id or None,
                 **self._retry_kwargs(),
             )
             if not matches:
-                raise FileNotFoundError(
-                    f"pasta oficial '{top}' não encontrada na raiz do Drive "
-                    f"({self._settings.google_drive_root_folder_id}) — precisa existir "
-                    "manualmente, o provider nunca a cria"
-                )
-            parent_id = matches[0]["id"]
+                if top == INTEGRATION_TESTS_PREFIX and create_missing:
+                    created = await drive_api.create_folder(
+                        client, token, root_id, top, **self._retry_kwargs()
+                    )
+                    parent_id = created["id"]
+                    self._logger.info("storage.folder_created", path=top)
+                else:
+                    qualifier = "interna" if top == INTEGRATION_TESTS_PREFIX else "oficial"
+                    raise FileNotFoundError(
+                        f"pasta {qualifier} '{top}' não encontrada na raiz do Drive "
+                        f"({root_id}) — execute dhf-storage bootstrap para reparar a árvore"
+                    )
+            else:
+                parent_id = matches[0]["id"]
             self._cache.set(top, parent_id)
 
         resolved = top
@@ -183,6 +372,7 @@ class GoogleDriveStorageProvider:
                     parent_id,
                     name=segment,
                     folders_only=True,
+                    shared_drive_id=self._settings.google_drive_shared_drive_id or None,
                     **self._retry_kwargs(),
                 )
                 if matches:
@@ -204,7 +394,13 @@ class GoogleDriveStorageProvider:
         client = await self._get_client()
         token = await self._get_token()
         matches = await drive_api.list_children(
-            client, token, parent_id, name=filename, folders_only=False, **self._retry_kwargs()
+            client,
+            token,
+            parent_id,
+            name=filename,
+            folders_only=False,
+            shared_drive_id=self._settings.google_drive_shared_drive_id or None,
+            **self._retry_kwargs(),
         )
         files_only = [m for m in matches if m.get("mimeType") != drive_api.FOLDER_MIME_TYPE]
         return files_only[0] if files_only else None
@@ -222,13 +418,10 @@ class GoogleDriveStorageProvider:
         )
 
     @staticmethod
-    async def _read_chunks(local_path: str, chunk_size: int) -> AsyncIterator[bytes]:
+    async def _read_chunk(local_path: str, offset: int, length: int) -> bytes:
         async with aiofiles.open(local_path, "rb") as f:
-            while True:
-                chunk = await f.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
+            await f.seek(offset)
+            return await f.read(length)
 
     # ------------------------------------------------------------------ status (público)
 
@@ -254,6 +447,7 @@ class GoogleDriveStorageProvider:
                 status = StorageStatus(
                     status=StorageConnectionStatus.ERROR,
                     detail=str(self._credential_load_error),
+                    auth_mode=self._auth_mode,
                     checked_at=now,
                 )
                 self._status_cache = status
@@ -262,41 +456,117 @@ class GoogleDriveStorageProvider:
             if self._credentials is None:
                 status = StorageStatus(
                     status=StorageConnectionStatus.NOT_CONFIGURED,
-                    detail="GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON/_FILE não configurados",
+                    detail=_NOT_CONFIGURED_DETAIL,
+                    auth_mode=self._auth_mode,
                     checked_at=now,
                 )
                 self._status_cache = status
                 return status
 
-            root_id = self._settings.google_drive_root_folder_id
+            root_id: str | None = None
             try:
                 client = await self._get_client()
                 token = await self._get_token()
+                root_id = self._require_root_id()
+                root_metadata = await drive_api.get_file_metadata(
+                    client, token, root_id, **self._retry_kwargs()
+                )
+                self._validate_managed_root(root_metadata)
+                actual_shared_drive_id = root_metadata.get("driveId")
+                configured_shared_drive_id = self._settings.google_drive_shared_drive_id or None
+                if configured_shared_drive_id != actual_shared_drive_id:
+                    raise ValueError(
+                        "GOOGLE_DRIVE_SHARED_DRIVE_ID não corresponde ao Drive da pasta raiz"
+                    )
                 children = await drive_api.list_children(
-                    client, token, root_id, folders_only=True, **self._retry_kwargs()
+                    client,
+                    token,
+                    root_id,
+                    folders_only=True,
+                    shared_drive_id=configured_shared_drive_id,
+                    **self._retry_kwargs(),
                 )
+                quota = await drive_api.get_storage_quota(client, token, **self._retry_kwargs())
+            except StorageAuthExpiredError:
+                status = StorageStatus(
+                    status=StorageConnectionStatus.AUTH_EXPIRED,
+                    detail=_AUTH_EXPIRED_DETAIL,
+                    error_code="AUTH_EXPIRED",
+                    root_folder_id=root_id,
+                    auth_mode=self._auth_mode,
+                    checked_at=now,
+                )
+                self._status_cache = status
+                return status
+            except StorageRootNotBootstrappedError as exc:
+                status = StorageStatus(
+                    status=StorageConnectionStatus.NOT_CONFIGURED,
+                    detail=str(exc),
+                    error_code="ROOT_NOT_BOOTSTRAPPED",
+                    auth_mode=self._auth_mode,
+                    checked_at=now,
+                )
+                self._status_cache = status
+                return status
+            except RootStateError as exc:
+                status = StorageStatus(
+                    status=StorageConnectionStatus.ERROR,
+                    detail=str(exc),
+                    error_code="ROOT_STATE_ERROR",
+                    root_folder_id=root_id,
+                    auth_mode=self._auth_mode,
+                    checked_at=now,
+                )
+                self._status_cache = status
+                return status
             except Exception as exc:  # noqa: BLE001 - logado completo, exposto só sanitizado
-                self._logger.error(
-                    "storage.status_check_failed", error=str(exc), error_type=type(exc).__name__
-                )
+                self._logger.error("storage.status_check_failed", error_type=type(exc).__name__)
                 sanitized = sanitize_error(_root_cause(exc))
                 status = StorageStatus(
                     status=StorageConnectionStatus.ERROR,
                     detail=sanitized.message,
                     error_code=sanitized.code,
                     root_folder_id=root_id,
+                    auth_mode=self._auth_mode,
                     checked_at=now,
                 )
                 self._status_cache = status
                 return status
 
             tree: TreeValidationResult = validate_tree([c["name"] for c in children])
+            quota_limit = quota["limit"]
+            quota_usage = quota["usage"]
+            quota_exhausted = (
+                quota_limit is not None and quota_usage is not None and quota_usage >= quota_limit
+            )
+            degraded = not tree.valid or quota_exhausted
+            if quota_exhausted:
+                detail = (
+                    "cota de armazenamento Google esgotada; libere espaço antes de "
+                    "enviar novos arquivos"
+                )
+                error_code = "STORAGE_QUOTA_EXCEEDED"
+            elif not tree.valid:
+                detail = f"faltam {len(tree.missing)} pasta(s) oficiais"
+                error_code = "STORAGE_TREE_INCOMPLETE"
+            else:
+                detail = None
+                error_code = None
             status = StorageStatus(
-                status=StorageConnectionStatus.CONNECTED
-                if tree.valid
-                else StorageConnectionStatus.DEGRADED,
-                detail=None if tree.valid else f"faltam {len(tree.missing)} pasta(s) oficiais",
+                status=(
+                    StorageConnectionStatus.DEGRADED
+                    if degraded
+                    else StorageConnectionStatus.CONNECTED
+                ),
+                detail=detail,
+                error_code=error_code,
                 root_folder_id=root_id,
+                auth_mode=self._auth_mode,
+                drive_kind=(
+                    StorageDriveKind.SHARED_DRIVE
+                    if root_metadata.get("driveId")
+                    else StorageDriveKind.MY_DRIVE
+                ),
                 tree=tree,
                 checked_at=now,
             )
@@ -313,6 +583,7 @@ class GoogleDriveStorageProvider:
 
         size_bytes = os.path.getsize(local_path)
         mime_type = mimetypes.guess_type(local_path)[0] or _UPLOAD_MIME_DEFAULT
+        local_checksum = await asyncio.to_thread(self._md5, Path(local_path))
 
         existing = await self._find_file(parent_id, filename)
 
@@ -332,12 +603,14 @@ class GoogleDriveStorageProvider:
 
         chunk_size = self._settings.google_drive_upload_chunk_size_bytes
         start = time.perf_counter()
-        raw = await drive_api.upload_content_stream(
+        raw = await drive_api.upload_content_resumable(
             client,
+            token,
             upload_url,
-            lambda: self._read_chunks(local_path, chunk_size),
+            lambda offset, length: self._read_chunk(local_path, offset, length),
             mime_type,
             size_bytes,
+            chunk_size,
             **self._retry_kwargs(),
         )
         duration_s = round(time.perf_counter() - start, 3)
@@ -348,7 +621,15 @@ class GoogleDriveStorageProvider:
             duration_s=duration_s,
             overwrote_existing=existing is not None,
         )
-        return self._map_metadata(raw, remote_path)
+        entry = self._map_metadata(raw, remote_path)
+        if entry.checksum != local_checksum:
+            self._logger.error(
+                "storage.upload_checksum_mismatch",
+                remote_path=remote_path,
+                size_bytes=size_bytes,
+            )
+            raise StorageIntegrityError("checksum do upload diverge do arquivo local")
+        return entry
 
     async def download(self, remote_path: str, local_path: str) -> None:
         self._require_configured()
@@ -371,10 +652,20 @@ class GoogleDriveStorageProvider:
         start = time.perf_counter()
         written = 0
         try:
-            async with aiofiles.open(temporary_path, "wb") as f:
-                async for chunk in drive_api.download_stream(client, token, existing["id"]):
-                    await f.write(chunk)
-                    written += len(chunk)
+
+            async def _download_once() -> int:
+                attempt_written = 0
+                async with aiofiles.open(temporary_path, "wb") as f:
+                    async for chunk in drive_api.download_stream(client, token, existing["id"]):
+                        await f.write(chunk)
+                        attempt_written += len(chunk)
+                return attempt_written
+
+            written = await with_retry(_download_once, **self._retry_kwargs())
+            expected_checksum = existing.get("md5Checksum")
+            actual_checksum = await asyncio.to_thread(self._md5, temporary_path)
+            if expected_checksum is None or actual_checksum != expected_checksum:
+                raise StorageIntegrityError("checksum do download diverge do metadata do Drive")
             # Troca atômica: um destino pré-existente só é substituído depois que o
             # download termina. Falhas preservam a última cópia íntegra.
             os.replace(temporary_path, destination)
@@ -402,8 +693,10 @@ class GoogleDriveStorageProvider:
         # Checagem de segurança primeiro, antes de qualquer chamada à API: um caminho fora
         # da área de scratch sem allow_permanent=True nem chega a resolver pasta/arquivo.
         if not allow_permanent and not is_within_scratch(remote_path):
+            safe_areas = ", ".join(f"{prefix}/" for prefix in SAFE_TRASH_PREFIXES)
             raise StoragePermanentDeleteBlockedError(
-                f"'{remote_path}' está fora de {SCRATCH_PREFIX}/ — delete() aqui exige "
+                f"'{remote_path}' está fora das áreas seguras ({safe_areas}) — "
+                "delete() aqui exige "
                 "allow_permanent=True explícito (proteção contra exclusão de arquivos "
                 "permanentes)"
             )
@@ -440,7 +733,12 @@ class GoogleDriveStorageProvider:
         client = await self._get_client()
         token = await self._get_token()
         children = await drive_api.list_children(
-            client, token, parent_id, folders_only=False, **self._retry_kwargs()
+            client,
+            token,
+            parent_id,
+            folders_only=False,
+            shared_drive_id=self._settings.google_drive_shared_drive_id or None,
+            **self._retry_kwargs(),
         )
         files_only = [c for c in children if c.get("mimeType") != drive_api.FOLDER_MIME_TYPE]
         prefix_norm = "/".join(segments)
@@ -457,6 +755,8 @@ class GoogleDriveStorageProvider:
 
     async def copy(self, src: str, dst: str) -> None:
         self._require_configured()
+        if src.strip("/") == dst.strip("/"):
+            raise ValueError("origem e destino de copy não podem ser iguais")
         src_folder, src_name = self._split(src)
         dst_folder, dst_name = self._split(dst)
 
@@ -466,6 +766,8 @@ class GoogleDriveStorageProvider:
             raise FileNotFoundError(f"'{src}' não existe no Drive")
 
         dst_parent = await self._resolve_path(dst_folder, create_missing=True)
+        if await self._find_file(dst_parent, dst_name) is not None:
+            raise FileExistsError(f"destino '{dst}' já existe no Drive")
         client = await self._get_client()
         token = await self._get_token()
         await drive_api.copy_file(
@@ -475,6 +777,8 @@ class GoogleDriveStorageProvider:
 
     async def move(self, src: str, dst: str) -> None:
         self._require_configured()
+        if src.strip("/") == dst.strip("/"):
+            raise ValueError("origem e destino de move não podem ser iguais")
         src_folder, src_name = self._split(src)
         dst_folder, dst_name = self._split(dst)
 
@@ -484,6 +788,9 @@ class GoogleDriveStorageProvider:
             raise FileNotFoundError(f"'{src}' não existe no Drive")
 
         dst_parent = await self._resolve_path(dst_folder, create_missing=True)
+        destination = await self._find_file(dst_parent, dst_name)
+        if destination is not None and destination["id"] != existing["id"]:
+            raise FileExistsError(f"destino '{dst}' já existe no Drive")
         client = await self._get_client()
         token = await self._get_token()
         await drive_api.move_file(
@@ -523,9 +830,13 @@ class GoogleDriveStorageProvider:
                 await self.upload(str(local_file), remote_path)
                 uploaded.append(remote_path)
             except Exception as exc:  # noqa: BLE001 - um arquivo falho não derruba o sync inteiro
-                failed.append((remote_path, f"{type(exc).__name__}: {exc}"))
+                sanitized = sanitize_error(_root_cause(exc))
+                failed.append((remote_path, f"{sanitized.code}: {sanitized.message}"))
                 self._logger.error(
-                    "storage.sync_file_failed", remote_path=remote_path, error=str(exc)
+                    "storage.sync_file_failed",
+                    remote_path=remote_path,
+                    error_code=sanitized.code,
+                    error_type=type(exc).__name__,
                 )
 
         duration_s = round(time.perf_counter() - start, 3)

@@ -1,32 +1,130 @@
-# STORAGE_GOOGLE_DRIVE.md — Digital Human Video Factory
+# Google Drive Storage — Digital Human Video Factory
 
-> Status: **Fase 2 — código completo, validação real com credencial pendente.**
-> Implementação: `services/storage` (`dhf_storage`). Interface: `packages/schemas/dhf_schemas/storage.py`.
+> V1 implementada e validada com OAuth User + `drive.file` em integração real.
 
----
+## Decisão da V1
 
-## 1. Visão geral
+- autenticação: OAuth User;
+- único escopo Drive: `https://www.googleapis.com/auth/drive.file`;
+- root técnica: `CRIADOR DE VIDEO — STORAGE`, criada pelo aplicativo;
+- a pasta histórica `CRIADOR DE VIDEO` não é consultada, alterada, movida nem apagada.
 
-O Google Drive é a **fonte definitiva** dos ativos do projeto (seção 6 do prompt-mestre) —
-o SSD do nó Hostinger é hot storage/cache/scratch, nunca a fonte de verdade.
-`GoogleDriveStorageProvider` é a única implementação de `StorageProvider` até aqui, feita
-sobre chamadas REST diretas à Drive API v3 (`httpx` assíncrono), autenticando com uma
-service account via `google-auth`.
+`drive.file` concede acesso por item. Como a root, as 18 pastas e todo ativo futuro são
+criados pelo próprio aplicativo, o provider consegue operar todo o contrato sem acesso ao
+restante do My Drive. Arquivos colocados manualmente na root não devem ser considerados
+acessíveis; migrações devem ser feitas por upload do aplicativo ou seleção individual
+explícita em uma futura integração com Google Picker.
 
-**Regra que este provider nunca quebra:** sem uma credencial válida, todo `get_status()`
-retorna `NOT_CONFIGURED` — nunca finge estar conectado. Qualquer outra operação
-(`upload`, `download`, ...) chamada sem credencial levanta `StorageNotConfiguredError`
-explicitamente, nunca falha silenciosa ou sucesso falso.
+## Bootstrap e persistência da root
 
-## 2. Árvore oficial de pastas
+O comando `bootstrap` executa OAuth Desktop se o token ainda não existe, depois:
 
-Criada **manualmente** pelo usuário no Google Drive — o provider nunca cria, renomeia ou
-apaga estas 18 pastas de topo, só as descobre por nome e valida que existem.
+1. tenta validar `GOOGLE_DRIVE_ROOT_FOLDER_ID`, quando configurado;
+2. senão, carrega o ID do state file persistido;
+3. se o state ficou obsoleto porque a pasta foi apagada, procura uma root criada pelo app;
+4. faz discovery por nome **e** pela marca privada
+   `appProperties.dhf_storage_root=v1`;
+5. recusa ambiguidades se encontrar mais de uma root marcada;
+6. cria a root somente quando nenhuma root marcada existe;
+7. salva o ID atomicamente em arquivo `0600`;
+8. cria apenas as pastas oficiais ausentes e recusa nomes oficiais duplicados.
 
-Pasta raiz **"CRIADOR DE VIDEO"**:
-[`13BTUf5Oyp8fb_CT2H0OJ6LeuZKzm3pxE`](https://drive.google.com/drive/folders/13BTUf5Oyp8fb_CT2H0OJ6LeuZKzm3pxE)
+Uma pasta manual com o mesmo nome não possui a marca privada e, portanto, nunca será
+adotada por engano.
 
+Os testes reais usam exclusivamente a área interna
+`CRIADOR DE VIDEO — STORAGE/_integration_tests/<uuid>`. Ela é criada sob demanda pelo
+provider, não conta entre as 18 pastas oficiais e sua limpeza envia artefatos para a
+lixeira recuperável. O scratch operacional `02_SISTEMA_STORAGE/_tmp` continua disponível,
+mas não é usado pela suíte de integração.
+
+Quando `GOOGLE_DRIVE_ROOT_STATE_FILE` não é informado, o arquivo é derivado de
+`GOOGLE_DRIVE_OAUTH_USER_FILE`. Por exemplo:
+
+```text
+google-drive-token.json
+google-drive-token.storage-state.json
 ```
+
+Em produção, onde o token costuma vir de `GOOGLE_DRIVE_OAUTH_USER_JSON`, configure o ID
+emitido pelo bootstrap como `GOOGLE_DRIVE_ROOT_FOLDER_ID` no secret/config do ambiente.
+
+## Configuração
+
+```dotenv
+GOOGLE_DRIVE_AUTH_MODE=oauth_user
+GOOGLE_DRIVE_ROOT_FOLDER_NAME=CRIADOR DE VIDEO — STORAGE
+GOOGLE_DRIVE_OAUTH_USER_FILE=/local/seguro/google-drive-token.json
+```
+
+O OAuth Client Desktop pode ser fornecido ao CLI pelo JSON baixado do Google Cloud. Como
+alternativa, o par abaixo pode vir do secret manager:
+
+```dotenv
+GOOGLE_DRIVE_CLIENT_ID=...
+GOOGLE_DRIVE_CLIENT_SECRET=...
+```
+
+Exatamente uma fonte de credencial de usuário deve existir: `_FILE` ou `_JSON`. O token,
+refresh token e client secret nunca entram no Git, frontend, logs ou URLs.
+
+### Comando inicial
+
+```bash
+uv run --project services/storage dhf-storage bootstrap \
+  --client-secrets-file /local/seguro/client_secret.json \
+  --token-file /local/seguro/google-drive-token.json
+```
+
+O consentimento usa browser do sistema e retorno loopback em `127.0.0.1`. Se o token já
+existe, o comando o reutiliza e apenas valida/repara a árvore. Para obter um novo token:
+
+```bash
+uv run --project services/storage dhf-storage bootstrap \
+  --client-secrets-file /local/seguro/client_secret.json \
+  --token-file /local/seguro/google-drive-token.json \
+  --reauthorize
+```
+
+## Testing, Production e AUTH_EXPIRED
+
+Com OAuth Publishing Status `Testing`, tokens de usuários de teste para escopos Drive
+expiram em sete dias. Isso é aceitável somente durante desenvolvimento.
+
+Antes da operação contínua na RTX, o aplicativo precisa estar `In production` ou usar uma
+alternativa Internal/Trusted permitida pelo Google. O refresh token ainda pode deixar de
+funcionar por revogação, inatividade ou política administrativa.
+
+Quando o endpoint de token devolve `invalid_grant`, o provider:
+
+- não repete a renovação indefinidamente;
+- levanta `StorageAuthExpiredError`;
+- expõe `status=auth_expired` e `error_code=AUTH_EXPIRED`;
+- mostra no frontend `Autorização expirada`;
+- exige novo bootstrap OAuth com `--reauthorize`.
+
+Outros erros permanecem sanitizados e nunca incluem token, URL de sessão ou corpo da
+credencial.
+
+O health check também consulta `about.get` (compatível com `drive.file`). Se o uso total
+alcançar o limite da conta, o backend e o dashboard reportam `DEGRADED` com
+`error_code=STORAGE_QUOTA_EXCEEDED`; a existência da root e das 18 pastas, sozinha, não é
+suficiente para declarar o Storage `CONNECTED`.
+
+## Validação real da V1
+
+A Definition of Done foi executada contra My Drive real usando somente
+`_integration_tests/<uuid>` e confirmou: bootstrap idempotente, 18/18 pastas, upload
+resumable em múltiplos chunks, retomada após perda de resposta, download atômico,
+checksum, exists, list, metadata, copy, move/rename, lixeira recuperável e sync
+idempotente. O status só foi promovido a `CONNECTED` depois da aprovação integral dessa
+suíte.
+
+## Árvore oficial
+
+O bootstrap cria idempotentemente estas 18 pastas:
+
+```text
 00_PROJETO_GOVERNANCA
 01_INFRA
 02_SISTEMA_STORAGE
@@ -47,142 +145,33 @@ Pasta raiz **"CRIADOR DE VIDEO"**:
 17_FUTURO_LIVE
 ```
 
-Lista canônica em código: `services/storage/dhf_storage/tree.py:OFFICIAL_TOP_LEVEL_FOLDERS`.
+Todo `remote_path` deve começar por um desses nomes. Segmentos vazios, `.`, `..` e byte
+nulo são rejeitados. Leituras nunca criam pastas; upload e sync podem criar somente
+subpastas abaixo da árvore oficial.
 
-### Convenção de caminho (`remote_path`)
+`delete()` sem `allow_permanent=True` só funciona em `02_SISTEMA_STORAGE/_tmp/` e move o
+arquivo para a lixeira recuperável. Fora do scratch, a chamada é bloqueada antes da rede.
 
-Todo método do provider recebe caminhos POSIX relativos à raiz, ex.:
+## Garantias técnicas
 
-```
-03_AVATAR_IDENTITY_FOTOS/lia/v1/head360/000.png
-07_VOICE_DNA/lia/v3/reference_01.wav
-02_SISTEMA_STORAGE/_tmp/teste-integracao-2026-09-10.bin
-```
+- upload resumable em blocos múltiplos de 256 KiB, com `Content-Range`, consulta do offset
+  confirmado e retomada apenas dos bytes faltantes;
+- download em streaming para temporário, retry desde zero e troca atômica;
+- checksum MD5 do conteúdo comparado com `md5Checksum` do Drive em upload e download;
+- list, metadata, exists, copy e move com bloqueio de colisão no destino;
+- sync por checksum;
+- retry/backoff apenas para transporte, `429` e `5xx`;
+- health real valida token, marca/nome/ID da root e as 18 pastas.
 
-- **1º segmento**: obrigatoriamente um dos 18 nomes oficiais acima — só descoberto, nunca
-  criado. Qualquer outro nome levanta `ValueError` imediatamente.
-- **Segmentos seguintes (pastas)**: descobertos e criados sob demanda
-  (`create_missing=True` em upload/sync; `False` em list/exists/download/get_metadata —
-  operações de leitura nunca criam pasta como efeito colateral). A criação é serializada
-  dentro de cada processo para evitar duplicatas locais. Como a Drive API não oferece
-  create-if-absent atômico, múltiplos processos escritores precisam ser coordenados pela
-  futura fila de jobs.
-- **Convenção de versão**: o provider não impõe nada — `v1`, `v2`, ... é só mais um
-  segmento de caminho, a cargo de quem chama (Avatar Registry, Voice Bank, ... a partir da
-  Fase 3). `StorageManifestEntry.version` fica disponível para o caller preencher.
-
-### Área de scratch (`02_SISTEMA_STORAGE/_tmp/`)
-
-Único lugar onde `delete()` sem `allow_permanent=True` tem efeito — e mesmo ali, move para
-a lixeira do Drive (recuperável), nunca exclusão definitiva. Usada pelos testes de
-integração para criar/apagar um arquivo de verdade sem risco de tocar ativos permanentes.
-
-## 3. Estados de conexão
-
-```
-NOT_CONFIGURED   nenhuma credencial configurada/carregável — caminho normal em dev
-CONNECTING       um refresh de status já está em andamento (outra requisição concorrente)
-CONNECTED        autenticado, raiz acessível, as 18 pastas oficiais foram encontradas
-DEGRADED         autenticado e acessível, mas falta alguma das 18 pastas oficiais
-ERROR            credencial presente mas autenticação ou chamada à API falhou
-```
-
-`get_status(force_refresh=False)` cacheia o resultado por
-`GOOGLE_DRIVE_STATUS_CACHE_TTL_S` segundos (default 30s) para não bater na Drive API a
-cada poll do dashboard; `force_refresh=true` ignora o cache.
-
-## 4. Configuração (variáveis de ambiente)
-
-Ver `.env.example` para a lista completa com comentários. Resumo:
-
-| Variável | Obrigatória | Descrição |
-|---|---|---|
-| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | Não (tem default = pasta oficial) | ID da pasta raiz |
-| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` | Uma das duas | Conteúdo do JSON da service account |
-| `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` | Uma das duas | Caminho local para o arquivo `.json` |
-| `GOOGLE_DRIVE_REQUEST_TIMEOUT_S` | Não | Timeout por request HTTP (default 30s) |
-| `GOOGLE_DRIVE_UPLOAD_CHUNK_SIZE_BYTES` / `..._DOWNLOAD_...` | Não | Tamanho do chunk de streaming (default 8 MiB) |
-| `GOOGLE_DRIVE_MAX_RETRIES` | Não | Tentativas em erro transitório (default 5) |
-| `GOOGLE_DRIVE_RETRY_BASE_DELAY_S` | Não | Base do backoff exponencial (default 1s) |
-| `GOOGLE_DRIVE_STATUS_CACHE_TTL_S` | Não | TTL do cache de status (default 30s) |
-
-**Produção (nó Hostinger): service account, nunca OAuth de usuário** — execução headless
-não tem navegador para completar um fluxo OAuth interativo. `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`
-via secret do ambiente é o caminho recomendado (não grava a chave em disco no container).
-`GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` é conveniente para dev local.
-
-A service account precisa ter sido **compartilhada como colaboradora** da pasta raiz
-"CRIADOR DE VIDEO" no Drive (uma service account não tem storage próprio — só enxerga o
-que foi explicitamente compartilhado com o e-mail dela).
-
-### Segurança
-
-- O conteúdo da credencial e o access token **nunca** aparecem em log — só o
-  "acontecimento" (`storage.credential_load_error` etc.) e mensagens de erro genéricas.
-- `.env` nunca é commitado (`.gitignore`); só `.env.example` com placeholders.
-- Sem chave no frontend: o `web` nunca fala com o Drive diretamente, sempre via `api`.
-
-## 5. Streaming e retry
-
-- **Upload**: sessão resumable de upload (`uploadType=resumable`); o arquivo local é lido
-  em chunks (`aiofiles`) e enviado num único PUT com o corpo em streaming — nunca carrega o
-  arquivo inteiro em memória. **Limitação conhecida**: não implementa retomada parcial após
-  falha a meio da transferência (isso exigiria o protocolo completo de resumable upload em
-  múltiplos PUTs com `Content-Range`); se o PUT falhar, o `with_retry` reenvia a tentativa
-  inteira, não só o pedaço que faltava.
-- **Download**: `GET .../files/{id}?alt=media`, resposta consumida via `client.stream(...)`
-  e gravada em disco em chunks num arquivo temporário vizinho. Só ao terminar ocorre troca
-  atômica; se falhar no meio, o temporário é removido e uma cópia anterior do destino é
-  preservada.
-- **Upload que já existe**: se já existe um arquivo com aquele nome na pasta de destino, o
-  provider faz `PATCH` (atualiza o conteúdo do arquivo existente) em vez de `POST` (criar
-  novo) — evita duplicar arquivos com o mesmo nome ao re-subir o mesmo `remote_path`.
-- **Retry**: só em `429` (quota) e `5xx`/erro de transporte, com backoff exponencial +
-  jitter, até `GOOGLE_DRIVE_MAX_RETRIES` tentativas. Qualquer outro código (`404`, `401`,
-  `403` fora de rate limit) propaga na primeira tentativa — nunca retry cego.
-
-## 6. Uso
-
-### Do código (outro serviço, a partir da Fase 3+)
-
-```python
-from dhf_storage.factory import get_storage_provider
-
-provider = get_storage_provider()
-entry = await provider.upload("/tmp/000.png", "03_AVATAR_IDENTITY_FOTOS/lia/v1/head360/000.png")
-```
-
-Consumidores só precisam depender de `dhf_schemas.storage.StorageProvider` (a interface) —
-nunca de `dhf_storage` diretamente, exceto quem efetivamente compõe/injeta o provider
-(hoje, só `apps/api`).
-
-### Endpoint HTTP
-
-```
-GET /storage/status               # cacheado (até 30s por padrão)
-GET /storage/status?force_refresh=true
-```
-
-### CLI
+## Verificação
 
 ```bash
 uv run --project services/storage dhf-storage check
-# ou
-uv run --project services/storage python -m dhf_storage check
+uv run --all-packages pytest tests/storage -m "not integration"
+uv run --all-packages pytest tests/storage/test_google_drive_integration.py -m integration -vv
 ```
 
-Saída: status, `root_folder_id`, e a árvore (pastas encontradas/faltando/inesperadas).
-Exit code `0` só quando `status == connected`; `1` em qualquer outro caso — pensado para
-uso em script/CI (ex.: gate de deploy no nó Hostinger).
-
-## 7. O que ainda não existe
-
-- Rotina de **backup do PostgreSQL para o Drive** (seção 65 do prompt-mestre) — planejada
-  para a Fase 2 no `ROADMAP.md` original, mas fora do escopo do card que implementou este
-  provider; ainda não construída.
-- `S3StorageProvider` / `R2StorageProvider` — adapters futuros atrás da mesma interface
-  `StorageProvider`, sem necessidade de tocar em quem já consome o provider.
-- Validação real contra o Drive de produção — ver `docs/ARCHITECTURE.md` §10: nenhuma
-  credencial foi fornecida ainda para esta implementação. Testes de integração reais
-  (`tests/storage/test_google_drive_integration.py`) existem e são corretos, mas ficam
-  `SKIPPED` até uma `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`/`_FILE` real ser configurada.
+Os testes reais criam nomes únicos somente no scratch, exercitam o contrato completo e
+movem os temporários para a lixeira. Um teste entrega o primeiro bloco ao Google, perde a
+resposta localmente e comprova a retomada na sessão real. Sem token, esses testes ficam
+`SKIPPED`, nunca geram sucesso falso.

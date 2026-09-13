@@ -281,6 +281,7 @@ capítulo continuam como contrato para a Fase 3+.
 ```python
 class StorageConnectionStatus(str, Enum):
     NOT_CONFIGURED = "not_configured"  # nenhuma credencial configurada/carregável
+    AUTH_EXPIRED = "auth_expired"      # invalid_grant; exige novo consentimento humano
     CONNECTING = "connecting"          # refresh de status em andamento (transitório)
     CONNECTED = "connected"            # autenticado, raiz acessível, árvore oficial completa
     DEGRADED = "degraded"              # autenticado e acessível, mas árvore incompleta/inesperada
@@ -297,6 +298,8 @@ class StorageStatus(BaseModel):
     status: StorageConnectionStatus
     detail: str | None
     root_folder_id: str | None
+    auth_mode: str | None
+    drive_kind: str | None
     tree: TreeValidationResult | None
     checked_at: datetime
 
@@ -701,7 +704,7 @@ até lá — nunca simulando sucesso.
 
 | Credencial | Usada por | Fase |
 |---|---|---|
-| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` (conteúdo) ou `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` (caminho) | `GoogleDriveStorageProvider` | 2 — **ainda não fornecida**; provider reporta `NOT_CONFIGURED` até então |
+| `GOOGLE_DRIVE_OAUTH_USER_JSON` (conteúdo) ou `GOOGLE_DRIVE_OAUTH_USER_FILE` (caminho) | `GoogleDriveStorageProvider` | 2 — OAuth User com `drive.file`; root `CRIADOR DE VIDEO — STORAGE` criada pelo app; segredo permanece externo ao repositório |
 | `OPENAI_API_KEY` | `OpenAIProvider` (Director AI) | 5 |
 | `ANTHROPIC_API_KEY` (opcional) | `AnthropicProvider` (Director AI) | 5 |
 | `ELEVENLABS_API_KEY` | `ElevenLabsProvider` | 4 |

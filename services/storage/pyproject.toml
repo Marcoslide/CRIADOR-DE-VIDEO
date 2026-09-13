@@ -7,6 +7,7 @@ dependencies = [
     "dhf-shared",
     "dhf-schemas",
     "google-auth>=2.35",
+    "google-auth-oauthlib>=1.2",
     "requests>=2.32",
     "httpx>=0.27",
     "aiofiles>=24.1",

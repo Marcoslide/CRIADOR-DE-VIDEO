@@ -4,6 +4,8 @@ valores definidos na missão, sem adição nem omissão silenciosa (mesmo princ�
 
 from enum import StrEnum
 
+from dhf_avatars.schemas import AvatarStatus
+
 
 class IdentityLockStatus(StrEnum):
     DRAFT = "draft"
@@ -320,3 +322,59 @@ class JobContractStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+# Gate -> status alvo (seção 4) — as únicas 10 transições que exigem evidência real; as
+# duas transições "_IN_PROGRESS" não têm gate, seguem pelo PATCH genérico de dhf_avatars.
+# Centralizado aqui (não em service.py nem repository.py) porque P1-6 exige que a MESMA
+# constante seja usada tanto pela validação quanto pela transação atômica que escreve —
+# duplicá-la arriscaria as duas divergirem silenciosamente.
+GATE_TARGET_STATUS: dict[QualityGateName, AvatarStatus] = {
+    QualityGateName.IDENTITY: AvatarStatus.IDENTITY_LOCKED,
+    QualityGateName.MULTIVIEW: AvatarStatus.MULTIVIEW_APPROVED,
+    QualityGateName.MESH: AvatarStatus.MESH_APPROVED,
+    QualityGateName.RIG: AvatarStatus.RIGGED,
+    QualityGateName.MATERIALS: AvatarStatus.MATERIALS_APPROVED,
+    QualityGateName.FACE: AvatarStatus.FACE_APPROVED,
+    QualityGateName.VOICE: AvatarStatus.VOICE_APPROVED,
+    QualityGateName.MOTION: AvatarStatus.MOTION_APPROVED,
+    QualityGateName.MASTER: AvatarStatus.MASTER_APPROVED,
+    QualityGateName.PRODUCTION: AvatarStatus.PRODUCTION_READY,
+}
+
+# Ordem canônica do pipeline (StrEnum já é declarado nesta ordem — `list(QualityGateName)`
+# bastaria, mas nomear explicitamente evita que uma reordenação futura do enum mude a
+# semântica de "downstream" por acidente).
+GATE_ORDER: tuple[QualityGateName, ...] = (
+    QualityGateName.IDENTITY,
+    QualityGateName.MULTIVIEW,
+    QualityGateName.MESH,
+    QualityGateName.RIG,
+    QualityGateName.MATERIALS,
+    QualityGateName.FACE,
+    QualityGateName.VOICE,
+    QualityGateName.MOTION,
+    QualityGateName.MASTER,
+    QualityGateName.PRODUCTION,
+)
+
+
+def downstream_gates_of(gate_name: QualityGateName) -> tuple[QualityGateName, ...]:
+    """Gates que vêm DEPOIS de `gate_name` no pipeline (P1-6b — invalidação em cascata):
+    se a evidência de `gate_name` deixa de ser válida, nenhum gate downstream pode
+    continuar PASS, já que seu enforcement presumia `gate_name` satisfeito."""
+    index = GATE_ORDER.index(gate_name)
+    return GATE_ORDER[index + 1 :]
+
+
+_AVATAR_STATUS_ORDER: list[AvatarStatus] = list(AvatarStatus)
+
+
+def predecessor_status_of(gate_name: QualityGateName) -> AvatarStatus:
+    """O status imediatamente ANTERIOR ao alvo de `gate_name` (P1-6b): para onde o avatar
+    regride quando esse gate é invalidado — ex.: se MULTIVIEW cai, o avatar volta para
+    MULTIVIEW_IN_PROGRESS (não para trás demais, não IDENTITY_LOCKED), já que essa
+    transição '_IN_PROGRESS' continua estruturalmente válida (o predecessor dela,
+    IDENTITY_LOCKED, nunca deixou de estar satisfeito)."""
+    target = GATE_TARGET_STATUS[gate_name]
+    return _AVATAR_STATUS_ORDER[_AVATAR_STATUS_ORDER.index(target) - 1]

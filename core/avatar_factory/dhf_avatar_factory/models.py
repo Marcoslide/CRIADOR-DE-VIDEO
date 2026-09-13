@@ -20,11 +20,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -49,6 +51,20 @@ class IdentityLockRecord(Base):
             name="ck_identity_locks_status_valid",
         ),
         CheckConstraint("version >= 1", name="ck_identity_locks_optimistic_version_positive"),
+        # P1-9: duas requisições concorrentes nunca conseguem criar a mesma geração duas
+        # vezes — a trava em código (lock de linha do avatar) já evita isso na prática,
+        # mas o banco é quem garante de verdade, mesmo se um caminho de código futuro
+        # esquecer de lockar.
+        UniqueConstraint("avatar_id", "identity_version", name="uq_identity_locks_avatar_version"),
+        # Partial unique index: nunca mais de um lock 'approved' por avatar — a MESMA
+        # invariante que `repository.approve_identity_lock` já impõe em código
+        # (supersede-antes-de-aprovar), agora também garantida pelo Postgres.
+        Index(
+            "uq_identity_locks_one_approved_per_avatar",
+            "avatar_id",
+            unique=True,
+            postgresql_where=text("status = 'approved'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -251,6 +267,15 @@ class DerivedAssetRecord(Base):
             name="ck_derived_assets_status_valid",
         ),
         CheckConstraint("version >= 1", name="ck_derived_assets_optimistic_version_positive"),
+        # P1-9: duas chamadas concorrentes de ensure_derived_asset_placeholders nunca
+        # duplicam a mesma linha (avatar, geração, tipo) — o lock de avatar em código já
+        # serializa isso, esta é a garantia de banco por baixo.
+        UniqueConstraint(
+            "avatar_id",
+            "avatar_version_group",
+            "asset_type",
+            name="uq_derived_assets_avatar_version_type",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -294,6 +319,14 @@ class JobContractRecord(Base):
         ),
         CheckConstraint("attempt >= 0", name="ck_job_contracts_attempt_non_negative"),
         CheckConstraint("version >= 1", name="ck_job_contracts_optimistic_version_positive"),
+        # P1-8: um contrato pertence a UMA geração — Identity v2 nunca reaproveita
+        # silenciosamente o contrato de v1 (novo conjunto é criado por version_group).
+        UniqueConstraint(
+            "avatar_id",
+            "avatar_version_group",
+            "job_type",
+            name="uq_job_contracts_avatar_version_type",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -301,6 +334,10 @@ class JobContractRecord(Base):
     )
     avatar_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), _avatar_fk(), nullable=False)
     job_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # P1-8: geração/lineage a que este contrato pertence — mesmo `avatar_version_group`
+    # usado por QualityGateRecord/DerivedAssetRecord (identity_version aprovado atual no
+    # momento da criação do contrato).
+    avatar_version_group: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     input_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     required_assets: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     output_contract: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

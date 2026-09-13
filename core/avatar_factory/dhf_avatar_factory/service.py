@@ -1,6 +1,11 @@
 """Regras de negócio do Avatar Factory Control Plane — orquestra `repository.py`
-(dados), `gate_requirements.py` (decisão pura de requisito) e `dhf_storage`/`dhf_avatars`
-(os dois subsistemas que este pacote consome sem alterar)."""
+(dados), `gate_requirements.py` (decisão pura de requisito) e `dhf_avatars`/`dhf_storage`
+(os dois subsistemas que este pacote consome sem alterar).
+
+P1-6: nenhuma função aqui faz uma leitura solta de evidência seguida de uma decisão —
+isso viveria fora da transação que escreve e reabriria a janela TOCTOU. A validação de
+requisitos, o lock de linhas e a escrita vivem juntos em `repository.*_atomic`; este
+módulo só traduz payload Pydantic -> chamada de repositório -> schema de resposta."""
 
 from __future__ import annotations
 
@@ -12,8 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from dhf_avatars import repository as avatars_repository
-from dhf_avatars.repository import AvatarVersionConflictError
-from dhf_avatars.schemas import ALLOWED_STATUS_TRANSITIONS, AvatarStatus
+from dhf_avatars.schemas import AvatarStatus
 from dhf_storage.factory import get_storage_provider
 
 from dhf_avatar_factory import gate_requirements, qa_checks, repository
@@ -44,7 +48,6 @@ from dhf_avatar_factory.schemas import (
     AvatarReadiness,
     AvatarStateTransition,
     DerivedAsset,
-    GateRequirementCheck,
     IdentityLock,
     IdentityLockApprove,
     IdentityLockUpsert,
@@ -79,36 +82,6 @@ class UploadTooLargeError(Exception):
         super().__init__(f"upload excede o limite de {max_bytes} bytes")
 
 
-class InvalidGateForCurrentStatusError(Exception):
-    def __init__(self, gate_name: QualityGateName, current_status: AvatarStatus) -> None:
-        self.gate_name = gate_name
-        self.current_status = current_status
-        super().__init__(f"gate '{gate_name}' não se aplica ao status atual '{current_status}'")
-
-
-class GateRequirementsNotMetError(Exception):
-    def __init__(self, gate_name: QualityGateName, missing: list[str]) -> None:
-        self.gate_name = gate_name
-        self.missing = missing
-        super().__init__(f"requisitos do gate '{gate_name}' não atendidos: {'; '.join(missing)}")
-
-
-# --- gate -> status alvo (seção 4) — as únicas 10 transições que exigem evidência real;
-# as duas transições "_IN_PROGRESS" continuam pelo PATCH genérico de dhf_avatars, que por
-# sua vez recusa (P1-1) qualquer uma DESTAS dez sem passar por `approve_gate` -------------
-_GATE_TARGET_STATUS: dict[QualityGateName, AvatarStatus] = {
-    QualityGateName.IDENTITY: AvatarStatus.IDENTITY_LOCKED,
-    QualityGateName.MULTIVIEW: AvatarStatus.MULTIVIEW_APPROVED,
-    QualityGateName.MESH: AvatarStatus.MESH_APPROVED,
-    QualityGateName.RIG: AvatarStatus.RIGGED,
-    QualityGateName.MATERIALS: AvatarStatus.MATERIALS_APPROVED,
-    QualityGateName.FACE: AvatarStatus.FACE_APPROVED,
-    QualityGateName.VOICE: AvatarStatus.VOICE_APPROVED,
-    QualityGateName.MOTION: AvatarStatus.MOTION_APPROVED,
-    QualityGateName.MASTER: AvatarStatus.MASTER_APPROVED,
-    QualityGateName.PRODUCTION: AvatarStatus.PRODUCTION_READY,
-}
-
 _GATE_LABELS: dict[QualityGateName, str] = {
     QualityGateName.IDENTITY: "Identity Lock aprovado",
     QualityGateName.MULTIVIEW: "Multiview aprovado",
@@ -142,7 +115,11 @@ async def _current_version_group(avatar_id: uuid.UUID) -> int:
     """A geração de identidade OFICIAL vigente (P1-5) — usada uniformemente como
     `capture_version` de novos uploads, `avatar_version_group` de gates/derived assets, e
     filtro de completude do multiview. Um draft de identidade mais novo em andamento NÃO
-    move este número até ser aprovado (ver `repository.get_latest_approved_identity_lock`)."""
+    move este número até ser aprovado (ver `repository.get_latest_approved_identity_lock`).
+    Só para LEITURA/exibição (listagens, upload de novas referências) — as decisões que
+    escrevem com base na lineage (aprovar/rejeitar gate, revisar reference asset) resolvem
+    a versão de novo, com lock, dentro da própria transação atômica (P1-6/P1-9), nunca
+    reaproveitando este valor lido fora dela."""
     lock = await repository.get_latest_approved_identity_lock(avatar_id)
     return lock.identity_version if lock is not None else 1
 
@@ -254,6 +231,7 @@ def _to_job_contract_schema(record: JobContractRecord) -> JobContract:
         id=record.id,
         avatar_id=record.avatar_id,
         job_type=record.job_type,
+        avatar_version_group=record.avatar_version_group,
         input_version=record.input_version,
         required_assets=list(record.required_assets),
         output_contract=record.output_contract,
@@ -269,7 +247,7 @@ def _to_job_contract_schema(record: JobContractRecord) -> JobContract:
     )
 
 
-# --- Identity Lock (seções 5-6, 18) -------------------------------------------------------
+# --- Identity Lock (seções 5-6, 18, P1-7) -------------------------------------------------
 
 
 async def get_identity_lock(avatar_id: uuid.UUID) -> IdentityLock | None:
@@ -280,47 +258,26 @@ async def get_identity_lock(avatar_id: uuid.UUID) -> IdentityLock | None:
 async def upsert_identity_lock_draft(
     avatar_id: uuid.UUID, payload: IdentityLockUpsert
 ) -> IdentityLock:
+    """P1-9: cria o primeiro draft ou edita o draft em andamento — tudo decidido DENTRO de
+    `repository.upsert_identity_lock_draft_atomic`, sob o lock do avatar, então duas
+    requisições concorrentes nunca criam duas linhas para a mesma `identity_version`
+    nova (`IdentityLockConcurrentCreationError` é a resposta correta quando a constraint
+    do banco pega uma corrida que o lock por algum motivo não serializou)."""
     await avatars_repository.get_avatar(avatar_id)  # 404 honesto se o avatar não existir
-    current = await repository.get_current_identity_lock(avatar_id)
-    spec_dict = payload.identity_spec.model_dump(mode="json")
-    source_ids = payload.source_asset_ids
-
-    if current is None or current.status == IdentityLockStatus.SUPERSEDED:
-        next_version = (current.identity_version + 1) if current else 1
-        record = await repository.create_identity_lock_draft(
-            avatar_id,
-            identity_version=next_version,
-            identity_spec=spec_dict,
-            height_cm=payload.height_cm,
-            notes=payload.notes,
-            source_asset_ids=source_ids,
-        )
-        return _to_identity_lock_schema(record)
-
-    if current.status == IdentityLockStatus.APPROVED:
-        record = await repository.create_identity_lock_draft(
-            avatar_id,
-            identity_version=current.identity_version + 1,
-            identity_spec=spec_dict,
-            height_cm=payload.height_cm,
-            notes=payload.notes,
-            source_asset_ids=source_ids,
-        )
-        return _to_identity_lock_schema(record)
-
-    # status == draft: edita a mesma linha em vez de criar uma nova a cada chamada.
-    record = await repository.update_identity_lock_draft(
-        current.id,
-        identity_spec=spec_dict,
+    record = await repository.upsert_identity_lock_draft_atomic(
+        avatar_id,
+        identity_spec=payload.identity_spec.model_dump(mode="json"),
         height_cm=payload.height_cm,
         notes=payload.notes,
-        source_asset_ids=source_ids,
-        expected_version=current.version,
+        source_asset_ids=payload.source_asset_ids,
     )
     return _to_identity_lock_schema(record)
 
 
 async def approve_identity_lock(avatar_id: uuid.UUID, payload: IdentityLockApprove) -> IdentityLock:
+    """P1-7: aprovar uma nova geração de identidade reinicia o lifecycle inteiro (gates
+    revertidos para NOT_TESTED, `AvatarRecord.status` reposicionado para DRAFT) — tudo
+    dentro de `repository.approve_identity_lock`, na mesma transação que aprova o lock."""
     current = await repository.get_current_identity_lock(avatar_id)
     if current is None:
         raise NoIdentityLockForAvatarError(avatar_id)
@@ -332,7 +289,7 @@ async def approve_identity_lock(avatar_id: uuid.UUID, payload: IdentityLockAppro
     return _to_identity_lock_schema(record)
 
 
-# --- Reference Assets (seções 7-12, P1-2, P1-3) --------------------------------------------
+# --- Reference Assets (seções 7-12, P1-2, P1-3, P1-6b) --------------------------------------
 
 
 def _guess_extension(filename: str) -> str:
@@ -426,11 +383,19 @@ async def _get_reference_asset_for_avatar(
 async def get_reference_asset_content(avatar_id: uuid.UUID, asset_id: uuid.UUID) -> tuple[str, str]:
     """Baixa o binário do Storage para um arquivo temporário e devolve seu caminho (para
     o router fazer streaming — P2: nunca carregamos o arquivo inteiro em RAM aqui) e o
-    mime type. O chamador é responsável por apagar o arquivo depois de servir a resposta."""
+    mime type. O chamador é responsável por apagar o arquivo depois de servir a resposta.
+
+    P2: se o download falhar, o tempfile já criado por `mkstemp` é apagado aqui mesmo —
+    sem isso, um Storage instável (timeout, 5xx, credencial expirada) vazava um arquivo
+    vazio a cada tentativa, e o content proxy é chamado a cada carregamento do viewer 360."""
     record = await _get_reference_asset_for_avatar(avatar_id, asset_id)
     fd, tmp_path = tempfile.mkstemp(suffix=_guess_extension(record.storage_remote_path))
     os.close(fd)
-    await get_storage_provider().download(record.storage_remote_path, tmp_path)
+    try:
+        await get_storage_provider().download(record.storage_remote_path, tmp_path)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
     return tmp_path, record.mime_type or "application/octet-stream"
 
 
@@ -447,7 +412,8 @@ async def approve_reference_asset(
     avatar_id: uuid.UUID, asset_id: uuid.UUID, payload: ReferenceAssetApprove
 ) -> ReferenceAsset:
     await _get_reference_asset_for_avatar(avatar_id, asset_id)
-    record = await repository.review_reference_asset(
+    record = await repository.review_reference_asset_atomic(
+        avatar_id,
         asset_id,
         approved=True,
         rejection_reason=None,
@@ -462,7 +428,11 @@ async def reject_reference_asset(
     avatar_id: uuid.UUID, asset_id: uuid.UUID, payload: ReferenceAssetReject
 ) -> ReferenceAsset:
     await _get_reference_asset_for_avatar(avatar_id, asset_id)
-    record = await repository.review_reference_asset(
+    # P1-6b: se este asset era evidência de um MULTIVIEW gate já PASS, a rejeição pode
+    # invalidar esse gate (e downstream) na MESMA transação — ver
+    # `repository.review_reference_asset_atomic`.
+    record = await repository.review_reference_asset_atomic(
+        avatar_id,
         asset_id,
         approved=False,
         rejection_reason=payload.reason.value,
@@ -479,7 +449,7 @@ async def get_multiview_completeness(avatar_id: uuid.UUID):
     return gate_requirements.compute_multiview_completeness(assets, capture_version=capture_version)
 
 
-# --- Quality Gates (seções 17, 22-25, P1-4, P1-5) -------------------------------------------
+# --- Quality Gates (seções 17, 22-25, P1-4, P1-5, P1-6, P1-6b) ------------------------------
 
 
 async def list_quality_gates(avatar_id: uuid.UUID) -> list[QualityGate]:
@@ -496,54 +466,17 @@ async def list_quality_gates(avatar_id: uuid.UUID) -> list[QualityGate]:
     return gates
 
 
-async def _check_requirements(
-    avatar_id: uuid.UUID, gate_name: QualityGateName, *, version_group: int
-) -> GateRequirementCheck:
-    if gate_name == QualityGateName.IDENTITY:
-        lock = await repository.get_latest_approved_identity_lock(avatar_id)
-        return gate_requirements.check_identity_gate(lock)
-    if gate_name == QualityGateName.MULTIVIEW:
-        lock = await repository.get_latest_approved_identity_lock(avatar_id)
-        assets = await repository.list_reference_assets(avatar_id)
-        return gate_requirements.check_multiview_gate(lock, assets, capture_version=version_group)
-    if gate_name == QualityGateName.PRODUCTION:
-        gates = await repository.list_gates(avatar_id)
-        statuses = {
-            QualityGateName(g.gate_name): g.status
-            for g in gates
-            if g.avatar_version_group == version_group
-        }
-        return gate_requirements.check_production_gate(statuses)
-    derived = await repository.list_derived_assets(avatar_id, version_group=version_group)
-    return gate_requirements.check_gpu_dependent_gate(gate_name, derived)
-
-
 async def approve_gate(
     avatar_id: uuid.UUID, gate_name: QualityGateName, payload: QualityGateDecisionRequest
 ) -> tuple[QualityGate, AvatarStateTransition | None]:
-    avatar = await avatars_repository.get_avatar(avatar_id)
-    if avatar.version != payload.expected_version:
-        raise AvatarVersionConflictError(avatar_id, payload.expected_version)
-
-    current_status = AvatarStatus(avatar.status)
-    target_status = _GATE_TARGET_STATUS[gate_name]
-    if target_status not in ALLOWED_STATUS_TRANSITIONS.get(current_status, set()):
-        raise InvalidGateForCurrentStatusError(gate_name, current_status)
-
-    version_group = await _current_version_group(avatar_id)
-    requirement_check = await _check_requirements(avatar_id, gate_name, version_group=version_group)
-    if not requirement_check.satisfied:
-        raise GateRequirementsNotMetError(gate_name, requirement_check.missing)
-
-    # P1-4: tudo (avançar o avatar, marcar o gate PASS, logar a decisão e a transição)
-    # acontece numa ÚNICA transação — ver `repository.approve_gate_atomic`.
+    """P1-6: nenhuma checagem de status ou de requisitos acontece aqui fora da transação —
+    `repository.approve_gate_atomic` faz tudo (lock do avatar, resolução da version
+    lineage, validação da evidência COM LOCK, e a escrita) numa ÚNICA transação, senão
+    haveria uma janela entre a leitura da evidência e o commit que decide com base nela."""
     gate_record, transition_record, _avatar_record = await repository.approve_gate_atomic(
         avatar_id,
-        gate_name=gate_name.value,
-        current_status=current_status.value,
-        target_status=target_status.value,
-        expected_avatar_version=avatar.version,
-        version_group=version_group,
+        gate_name=gate_name,
+        expected_avatar_version=payload.expected_version,
         checklist=_checklist_for(gate_name),
         reason=payload.reason,
         actor=payload.actor,
@@ -555,15 +488,10 @@ async def approve_gate(
 async def reject_gate(
     avatar_id: uuid.UUID, gate_name: QualityGateName, payload: QualityGateDecisionRequest
 ) -> QualityGate:
-    avatar = await avatars_repository.get_avatar(avatar_id)
-    if avatar.version != payload.expected_version:
-        raise AvatarVersionConflictError(avatar_id, payload.expected_version)
-
-    version_group = await _current_version_group(avatar_id)
     updated_gate = await repository.reject_gate_atomic(
         avatar_id,
-        gate_name=gate_name.value,
-        version_group=version_group,
+        gate_name=gate_name,
+        expected_avatar_version=payload.expected_version,
         checklist=_checklist_for(gate_name),
         reason=payload.reason,
         actor=payload.actor,
@@ -572,7 +500,7 @@ async def reject_gate(
     return _to_gate_schema(updated_gate)
 
 
-# --- Histórico / readiness / view agregada (seções 25, 26, 28, 33) ------------------------
+# --- Histórico / readiness / view agregada (seções 25, 26, 28, 33, P1-7) -------------------
 
 
 async def get_history(avatar_id: uuid.UUID) -> list[AvatarStateTransition]:
@@ -581,6 +509,12 @@ async def get_history(avatar_id: uuid.UUID) -> list[AvatarStateTransition]:
 
 
 async def get_readiness(avatar_id: uuid.UUID) -> AvatarReadiness:
+    """P1-7: `production_ready` é fail-closed — só é `True` quando o status É
+    PRODUCTION_READY *e* todo gate obrigatório está PASS *para a lineage atual* ao mesmo
+    tempo. Antes, só o status era checado: uma inconsistência de banco (ex.: um gate
+    reprovado depois que o avatar já tinha avançado) deixava `production_ready=True` com
+    gates faltando. Mesmo que ocorra inconsistência, esta função nunca "arredonda para
+    cima" — qualquer divergência vira `False` e aparece em `missing`."""
     avatar = await avatars_repository.get_avatar(avatar_id)
     version_group = await _current_version_group(avatar_id)
     gates = await repository.list_gates(avatar_id)
@@ -601,10 +535,11 @@ async def get_readiness(avatar_id: uuid.UUID) -> AvatarReadiness:
             missing.append(gate_name.value)
 
     status = AvatarStatus(avatar.status)
+    production_ready = status == AvatarStatus.PRODUCTION_READY and not missing
     return AvatarReadiness(
         avatar_id=avatar.id,
         status=status,
-        production_ready=status == AvatarStatus.PRODUCTION_READY,
+        production_ready=production_ready,
         requirements=requirements,
         missing=missing,
     )
@@ -619,7 +554,10 @@ async def list_derived_assets(avatar_id: uuid.UUID) -> list[DerivedAsset]:
 
 
 async def list_job_contracts(avatar_id: uuid.UUID) -> list[JobContract]:
-    records = await repository.ensure_default_job_contracts(avatar_id, input_version=1)
+    version_group = await _current_version_group(avatar_id)
+    records = await repository.ensure_default_job_contracts(
+        avatar_id, avatar_version_group=version_group
+    )
     return [_to_job_contract_schema(record) for record in records]
 
 

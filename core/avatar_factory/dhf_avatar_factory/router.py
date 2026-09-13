@@ -12,8 +12,11 @@ from fastapi.responses import StreamingResponse
 from dhf_avatar_factory import service
 from dhf_avatar_factory.enums import QualityGateName, ReferenceAssetCategory
 from dhf_avatar_factory.repository import (
+    GateRequirementsNotMetError,
+    IdentityLockConcurrentCreationError,
     IdentityLockNotDraftError,
     IdentityLockVersionConflictError,
+    InvalidGateForCurrentStatusError,
     NoIdentityLockForAvatarError,
     QualityGateNotFoundError,
     QualityGateVersionConflictError,
@@ -77,8 +80,11 @@ async def upsert_identity_lock(avatar_id: uuid.UUID, payload: IdentityLockUpsert
         return await service.upsert_identity_lock_draft(avatar_id, payload)
     except AvatarNotFoundError as exc:
         raise _avatar_not_found() from exc
-    except IdentityLockVersionConflictError as exc:
-        raise _version_conflict(exc.expected_version) from exc
+    except IdentityLockConcurrentCreationError as exc:
+        # P1-9: outra requisição concorrente venceu a corrida de criar esta mesma
+        # identity_version — 409 pede pro cliente tentar de novo (vai ver o draft que a
+        # outra requisição já criou).
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{avatar_id}/identity-lock", response_model=IdentityLock)
@@ -221,12 +227,12 @@ async def approve_quality_gate(
         raise _avatar_not_found() from exc
     except AvatarVersionConflictError as exc:
         raise _version_conflict(exc.expected_version) from exc
-    except service.InvalidGateForCurrentStatusError as exc:
+    except InvalidGateForCurrentStatusError as exc:
         raise HTTPException(
             status_code=409,
             detail=f"gate '{exc.gate_name}' não se aplica ao status atual '{exc.current_status}'",
         ) from exc
-    except service.GateRequirementsNotMetError as exc:
+    except GateRequirementsNotMetError as exc:
         raise HTTPException(
             status_code=409,
             detail={

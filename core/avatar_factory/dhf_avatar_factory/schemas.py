@@ -294,6 +294,7 @@ class JobContract(BaseModel):
     id: UUID
     avatar_id: UUID
     job_type: JobContractType
+    avatar_version_group: int
     input_version: int
     required_assets: list[str]
     output_contract: dict[str, Any]

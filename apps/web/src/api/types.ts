@@ -457,6 +457,7 @@ export interface JobContract {
   id: string;
   avatar_id: string;
   job_type: string;
+  avatar_version_group: number;
   input_version: number;
   required_assets: string[];
   output_contract: Record<string, unknown>;

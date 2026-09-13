@@ -11,12 +11,30 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from dhf_avatars.models import AvatarRecord
+from dhf_avatars.schemas import GATE_PROTECTED_STATUSES
+
+_GATE_PROTECTED_STATUS_VALUES: frozenset[str] = frozenset(s.value for s in GATE_PROTECTED_STATUSES)
 
 
 class AvatarNotFoundError(Exception):
     def __init__(self, avatar_id: uuid.UUID) -> None:
         self.avatar_id = avatar_id
         super().__init__(f"avatar {avatar_id} não encontrado")
+
+
+class GateProtectedStatusError(Exception):
+    """`update_avatar` recebeu um status gate-protected sem `allow_gate_protected_status=True`
+    — P1-1 da correção obrigatória: nenhum caminho de código, nem um bug futuro em outra
+    camada, consegue setar esses status sem passar pela transação atômica do quality gate
+    (`dhf_avatar_factory.repository.approve_gate_atomic`), a única chamadora autorizada a
+    passar essa flag."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(
+            f"status '{status}' só pode ser alcançado via quality gate aprovado, nunca "
+            "diretamente por update_avatar"
+        )
 
 
 class AvatarSlugConflictError(Exception):
@@ -76,7 +94,15 @@ async def update_avatar(
     metadata: dict[str, Any] | None = None,
     status: str | None = None,
     expected_version: int,
+    allow_gate_protected_status: bool = False,
 ) -> AvatarRecord:
+    if (
+        status is not None
+        and status in _GATE_PROTECTED_STATUS_VALUES
+        and not allow_gate_protected_status
+    ):
+        raise GateProtectedStatusError(status)
+
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         values: dict[str, Any] = {

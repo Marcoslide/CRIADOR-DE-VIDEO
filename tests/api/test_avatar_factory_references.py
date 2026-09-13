@@ -235,3 +235,146 @@ async def test_list_references_filters_by_category(
     body = response.json()
     assert len(body) == 1
     assert body[0]["category"] == "ear_left"
+
+
+# --- P1-2: um avatar nunca acessa reference asset de outro ----------------------------------
+
+
+async def test_approve_reference_from_another_avatar_returns_404(
+    client: httpx.AsyncClient, fake_storage_provider: FakeStorageProvider
+) -> None:
+    avatar_a = await _create_avatar(client, "cross-a-approve")
+    avatar_b = await _create_avatar(client, "cross-b-approve")
+    asset_b = (
+        await _upload(client, avatar_b["id"], category="face_front_neutral", seed=201)
+    ).json()
+
+    response = await client.post(
+        f"/avatars/{avatar_a['id']}/references/{asset_b['id']}/approve",
+        json={"expected_version": asset_b["version"], "reviewed_by": "marcos"},
+    )
+
+    assert response.status_code == 404
+    # o asset em si não foi tocado — continua não aprovado no avatar dono real.
+    still_unapproved = (await client.get(f"/avatars/{avatar_b['id']}/references")).json()
+    assert still_unapproved[0]["approved"] is False
+
+
+async def test_reject_reference_from_another_avatar_returns_404(
+    client: httpx.AsyncClient, fake_storage_provider: FakeStorageProvider
+) -> None:
+    avatar_a = await _create_avatar(client, "cross-a-reject")
+    avatar_b = await _create_avatar(client, "cross-b-reject")
+    asset_b = (
+        await _upload(client, avatar_b["id"], category="face_front_neutral", seed=202)
+    ).json()
+
+    response = await client.post(
+        f"/avatars/{avatar_a['id']}/references/{asset_b['id']}/reject",
+        json={"expected_version": asset_b["version"], "reason": "other", "reviewed_by": "marcos"},
+    )
+
+    assert response.status_code == 404
+
+
+async def test_reference_content_from_another_avatar_returns_404(
+    client: httpx.AsyncClient, fake_storage_provider: FakeStorageProvider
+) -> None:
+    avatar_a = await _create_avatar(client, "cross-a-content")
+    avatar_b = await _create_avatar(client, "cross-b-content")
+    asset_b = (
+        await _upload(client, avatar_b["id"], category="face_front_neutral", seed=203)
+    ).json()
+
+    response = await client.get(f"/avatars/{avatar_a['id']}/references/{asset_b['id']}/content")
+
+    assert response.status_code == 404
+
+
+async def test_approve_reference_from_correct_avatar_still_works(
+    client: httpx.AsyncClient, fake_storage_provider: FakeStorageProvider
+) -> None:
+    """Garante que a checagem de P1-2 não é overly-strict: o dono de verdade continua
+    conseguindo aprovar seus próprios assets."""
+    avatar = await _create_avatar(client, "cross-dono-legitimo")
+    asset = (await _upload(client, avatar["id"], category="face_front_neutral", seed=204)).json()
+
+    response = await client.post(
+        f"/avatars/{avatar['id']}/references/{asset['id']}/approve",
+        json={"expected_version": asset["version"], "reviewed_by": "marcos"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["approved"] is True
+
+
+# --- P1-3: recaptura nunca sobrescreve o binário anterior ------------------------------------
+
+
+async def test_recapture_same_slot_produces_two_distinct_immutable_paths(
+    client: httpx.AsyncClient, fake_storage_provider: FakeStorageProvider
+) -> None:
+    avatar = await _create_avatar(client, "recapture-imutavel")
+    image_a = _photo_bytes(seed=301)
+    image_b = _photo_bytes(seed=302)
+    assert image_a != image_b
+
+    first = (
+        await client.post(
+            f"/avatars/{avatar['id']}/references",
+            data={"category": "head_360", "angle": "0"},
+            files={"file": ("a.png", image_a, "image/png")},
+        )
+    ).json()
+    second = (
+        await client.post(
+            f"/avatars/{avatar['id']}/references",
+            data={"category": "head_360", "angle": "0"},
+            files={"file": ("b.png", image_b, "image/png")},
+        )
+    ).json()
+
+    assert first["id"] != second["id"]
+    assert first["storage_remote_path"] != second["storage_remote_path"]
+    assert str(first["id"]) in first["storage_remote_path"]
+    assert str(second["id"]) in second["storage_remote_path"]
+    assert first["checksum"] != second["checksum"]
+
+    # os DOIS binários continuam recuperáveis no Storage — a recaptura nunca sobrescreveu
+    # o objeto remoto da captura anterior.
+    assert fake_storage_provider.uploaded[first["storage_remote_path"]] == image_a
+    assert fake_storage_provider.uploaded[second["storage_remote_path"]] == image_b
+
+    content_a = await client.get(f"/avatars/{avatar['id']}/references/{first['id']}/content")
+    content_b = await client.get(f"/avatars/{avatar['id']}/references/{second['id']}/content")
+    assert content_a.content == image_a
+    assert content_b.content == image_b
+
+
+async def test_capture_version_is_not_hardcoded_and_follows_identity_generation(
+    client: httpx.AsyncClient, fake_storage_provider: FakeStorageProvider
+) -> None:
+    """P1-3/P1-5: `capture_version` acompanha a geração de identidade OFICIAL (aprovada)
+    do avatar — nunca fica preso em 1."""
+    avatar = await _create_avatar(client, "capture-version-real")
+    draft_v1 = (
+        await client.post(f"/avatars/{avatar['id']}/identity-lock", json={"identity_spec": {}})
+    ).json()
+    await client.post(
+        f"/avatars/{avatar['id']}/identity-lock/approve",
+        json={"expected_version": draft_v1["version"], "approved_by": "marcos"},
+    )
+    first = (await _upload(client, avatar["id"], category="face_front_neutral", seed=311)).json()
+    assert first["capture_version"] == 1
+
+    draft_v2 = (
+        await client.post(
+            f"/avatars/{avatar['id']}/identity-lock", json={"identity_spec": {}, "notes": "v2"}
+        )
+    ).json()
+    await client.post(
+        f"/avatars/{avatar['id']}/identity-lock/approve",
+        json={"expected_version": draft_v2["version"], "approved_by": "marcos"},
+    )
+    second = (await _upload(client, avatar["id"], category="face_front_neutral", seed=312)).json()
+    assert second["capture_version"] == 2

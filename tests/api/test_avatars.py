@@ -4,11 +4,17 @@ sem Docker"). Sem mocks: cada teste cria linhas de verdade no banco e confirma q
 persistem — inclusive através de um "restart" simulado do processo.
 """
 
+from __future__ import annotations
+
 import asyncio
 import uuid
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+
+if TYPE_CHECKING:
+    from tests.api.conftest import AdvanceToIdentityLocked
 
 pytestmark = pytest.mark.requires_services
 
@@ -139,10 +145,16 @@ async def test_stale_update_returns_409_instead_of_overwriting(client: httpx.Asy
     assert current["version"] == 2
 
 
-async def test_valid_status_transition_advances_one_step(client: httpx.AsyncClient) -> None:
-    slug = _unique_slug("teste-status-valido")
+async def test_patch_cannot_set_gate_protected_status_even_when_adjacent(
+    client: httpx.AsyncClient,
+) -> None:
+    """P1-1 (correção obrigatória): IDENTITY_LOCKED só pode ser alcançado aprovando o
+    quality gate 'identity' (`dhf_avatar_factory`) — o PATCH genérico recusa mesmo sendo
+    a próxima transição adjacente da máquina de estados, para nenhum caminho de código
+    conseguir contornar o enforcement dos gates."""
+    slug = _unique_slug("teste-status-gate-protegido")
     created = (
-        await client.post("/avatars", json={"name": "Avançável", "slug": slug, "metadata": {}})
+        await client.post("/avatars", json={"name": "Bloqueado", "slug": slug, "metadata": {}})
     ).json()
     assert created["status"] == "draft"
 
@@ -150,10 +162,35 @@ async def test_valid_status_transition_advances_one_step(client: httpx.AsyncClie
         f"/avatars/{created['id']}",
         json={"status": "identity_locked", "expected_version": created["version"]},
     )
+
+    assert response.status_code == 409
+    unchanged = (await client.get(f"/avatars/{created['id']}")).json()
+    assert unchanged["status"] == "draft"
+    assert unchanged["version"] == created["version"]
+
+
+async def test_patch_can_advance_in_progress_status_once_predecessor_gate_satisfied(
+    client: httpx.AsyncClient, advance_to_identity_locked: AdvanceToIdentityLocked
+) -> None:
+    """As duas transições '_IN_PROGRESS' (seção 4) não têm gate próprio e continuam pelo
+    PATCH genérico — mas só ficam alcançáveis depois que o predecessor gate-protected foi
+    satisfeito de verdade (aqui, IDENTITY_LOCKED via gate real)."""
+    slug = _unique_slug("teste-in-progress-ok")
+    created = (
+        await client.post("/avatars", json={"name": "Em Progresso", "slug": slug, "metadata": {}})
+    ).json()
+    identity_locked = await advance_to_identity_locked(client, created)
+
+    response = await client.patch(
+        f"/avatars/{identity_locked['id']}",
+        json={
+            "status": "multiview_in_progress",
+            "expected_version": identity_locked["version"],
+        },
+    )
+
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "identity_locked"
-    assert body["version"] == 2
+    assert response.json()["status"] == "multiview_in_progress"
 
 
 async def test_invalid_status_transition_returns_409(client: httpx.AsyncClient) -> None:
@@ -191,17 +228,14 @@ async def test_delete_draft_avatar(client: httpx.AsyncClient) -> None:
     assert (await client.get(f"/avatars/{created['id']}")).status_code == 404
 
 
-async def test_delete_non_draft_avatar_is_blocked(client: httpx.AsyncClient) -> None:
+async def test_delete_non_draft_avatar_is_blocked(
+    client: httpx.AsyncClient, advance_to_identity_locked: AdvanceToIdentityLocked
+) -> None:
     slug = _unique_slug("teste-delete-bloqueado")
     created = (
         await client.post("/avatars", json={"name": "Em uso", "slug": slug, "metadata": {}})
     ).json()
-    advanced = (
-        await client.patch(
-            f"/avatars/{created['id']}",
-            json={"status": "identity_locked", "expected_version": created["version"]},
-        )
-    ).json()
+    advanced = await advance_to_identity_locked(client, created)
 
     response = await client.delete(
         f"/avatars/{created['id']}", params={"expected_version": advanced["version"]}
@@ -209,7 +243,9 @@ async def test_delete_non_draft_avatar_is_blocked(client: httpx.AsyncClient) -> 
     assert response.status_code == 409
 
 
-async def test_avatar_survives_simulated_process_restart(client: httpx.AsyncClient) -> None:
+async def test_avatar_survives_simulated_process_restart(
+    client: httpx.AsyncClient, advance_to_identity_locked: AdvanceToIdentityLocked
+) -> None:
     """Prova exigida pela missão: 'reinicie API -> dado continua existindo'. Sem um
     processo uvicorn de verdade para matar neste teste, simulamos o efeito que importa —
     descartamos o engine/sessionmaker assíncrono cacheado (lru_cache) e deixamos a próxima
@@ -223,13 +259,7 @@ async def test_avatar_survives_simulated_process_restart(client: httpx.AsyncClie
             "/avatars", json={"name": "Sobrevivente", "slug": slug, "metadata": {"antes": True}}
         )
     ).json()
-    updated = (
-        await client.patch(
-            f"/avatars/{created['id']}",
-            json={"status": "identity_locked", "expected_version": created["version"]},
-        )
-    ).json()
-    assert updated["version"] == 2
+    await advance_to_identity_locked(client, created)
 
     await get_engine().dispose()
     get_engine.cache_clear()

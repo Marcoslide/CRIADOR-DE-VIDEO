@@ -71,7 +71,7 @@ def _full_multiview_assets() -> list[ReferenceAssetRecord]:
 
 class TestMultiviewCompleteness:
     def test_empty_assets_reports_everything_missing(self) -> None:
-        completeness = compute_multiview_completeness([])
+        completeness = compute_multiview_completeness([], capture_version=1)
 
         assert completeness.head_360.total == 36
         assert completeness.head_360.done == 0
@@ -81,7 +81,7 @@ class TestMultiviewCompleteness:
         assert completeness.all_required_approved is False
 
     def test_fully_approved_set_marks_all_required_approved(self) -> None:
-        completeness = compute_multiview_completeness(_full_multiview_assets())
+        completeness = compute_multiview_completeness(_full_multiview_assets(), capture_version=1)
 
         assert completeness.head_360.done == 36
         assert completeness.half_body_360.done == 36
@@ -97,7 +97,7 @@ class TestMultiviewCompleteness:
             ReferenceAssetCategory.HEAD_360, angle=0, approved=False, upload_state="rejected"
         )
 
-        completeness = compute_multiview_completeness(assets)
+        completeness = compute_multiview_completeness(assets, capture_version=1)
 
         assert completeness.open_rejections == 1
         assert completeness.all_required_approved is False
@@ -118,12 +118,24 @@ class TestMultiviewCompleteness:
             created_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
 
-        completeness = compute_multiview_completeness([old, new])
+        completeness = compute_multiview_completeness([old, new], capture_version=1)
 
         assert completeness.open_rejections == 0  # a rejeição antiga não conta mais
         head_slot_zero = next(slot for slot in completeness.head_360.slots if slot.angle == 0)
         assert head_slot_zero.state == "approved"
         assert head_slot_zero.asset_id == new.id
+
+    def test_assets_from_a_stale_capture_version_never_count_p1_5(self) -> None:
+        """P1-5 — lineage: um asset aprovado na geração 1 nunca satisfaz o cálculo de
+        completude da geração 2, mesmo que ainda exista no banco como histórico."""
+        stale = _full_multiview_assets()  # todos com capture_version=1 (default de _asset)
+
+        completeness = compute_multiview_completeness(stale, capture_version=2)
+
+        assert completeness.head_360.done == 0
+        assert completeness.specialized_done == 0
+        assert completeness.expression_done == 0
+        assert completeness.all_required_approved is False
 
 
 class TestIdentityGate:
@@ -144,21 +156,29 @@ class TestIdentityGate:
 
 class TestMultiviewGate:
     def test_blocked_without_identity_lock(self) -> None:
-        result = check_multiview_gate(None, _full_multiview_assets())
+        result = check_multiview_gate(None, _full_multiview_assets(), capture_version=1)
         assert result.satisfied is False
         assert any("Identity Lock" in reason for reason in result.missing)
 
     def test_blocked_with_incomplete_assets(self) -> None:
         lock = _identity_lock(IdentityLockStatus.APPROVED)
-        result = check_multiview_gate(lock, [])
+        result = check_multiview_gate(lock, [], capture_version=1)
         assert result.satisfied is False
         assert len(result.missing) >= 5  # head/half/full/specialized/expression todos faltando
 
     def test_satisfied_with_approved_identity_and_complete_assets(self) -> None:
         lock = _identity_lock(IdentityLockStatus.APPROVED)
-        result = check_multiview_gate(lock, _full_multiview_assets())
+        result = check_multiview_gate(lock, _full_multiview_assets(), capture_version=1)
         assert result.satisfied is True
         assert result.missing == []
+
+    def test_blocked_when_assets_belong_to_a_stale_capture_version_p1_5(self) -> None:
+        lock = _identity_lock(IdentityLockStatus.APPROVED)
+        stale_assets = _full_multiview_assets()  # capture_version=1
+
+        result = check_multiview_gate(lock, stale_assets, capture_version=2)
+
+        assert result.satisfied is False
 
 
 class TestGpuDependentGates:

@@ -1,15 +1,35 @@
-"""Fixtures compartilhadas por `tests/api/` — hoje só o dublê de Storage usado pelos
-testes do Avatar Factory Control Plane (upload de referências)."""
+"""Fixtures e helpers compartilhados por `tests/api/`.
+
+`FakeStorageProvider`/`fake_storage_provider`: dublê de Storage usado pelos testes do
+Avatar Factory Control Plane (upload de referências).
+
+`advance_to_identity_locked`/`complete_full_multiview_and_approve`: fixtures-factory
+(devolvem uma função async) que existem porque a correção P1-1 proíbe usar o PATCH
+genérico (`_force_status`, removido) para pular etapas do pipeline — qualquer teste que
+precise de um avatar além de DRAFT agora precisa passar pelo fluxo real (Identity Lock
+aprovado -> gate identity aprovado -> ...), exatamente como a API exige em produção.
+Expostas como fixtures (não funções soltas importadas) porque `tests/` não tem
+`__init__.py` — `conftest.py` não é importável como módulo Python normal, só carregável
+pelo mecanismo de plugin do pytest."""
 
 from __future__ import annotations
 
 import hashlib
+import io
 import mimetypes
+import random
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
+from dhf_avatar_factory.enums import EXPRESSION_CATEGORIES, REQUIRED_ANGLES, SPECIALIZED_CATEGORIES
 from dhf_schemas.storage import StorageManifestEntry
+from PIL import Image
+
+AdvanceToIdentityLocked = Callable[[httpx.AsyncClient, dict], Awaitable[dict]]
+CompleteFullMultiview = Callable[[httpx.AsyncClient, dict], Awaitable[dict]]
 
 
 class FakeStorageProvider:
@@ -45,3 +65,103 @@ def fake_storage_provider(monkeypatch: pytest.MonkeyPatch) -> FakeStorageProvide
     fake = FakeStorageProvider()
     monkeypatch.setattr("dhf_avatar_factory.service.get_storage_provider", lambda: fake)
     return fake
+
+
+def photo_bytes(seed: int = 0) -> bytes:
+    """Ruído por pixel (não cor sólida) — passa nos checks determinísticos de verdade,
+    inclusive o heurístico de blur (ver tests/avatar_factory/test_qa_checks.py)."""
+    rng = random.Random(seed)
+    image = Image.new("RGB", (640, 640))
+    pixels = image.load()
+    for x in range(640):
+        for y in range(640):
+            value = rng.randint(20, 235)
+            pixels[x, y] = (value, value, value)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def advance_to_identity_locked() -> AdvanceToIdentityLocked:
+    async def _advance(client: httpx.AsyncClient, avatar: dict) -> dict:
+        """Sobe um avatar em DRAFT até IDENTITY_LOCKED pelo fluxo REAL — cria e aprova um
+        Identity Lock, depois aprova o gate 'identity'. Nunca usa PATCH genérico para
+        isso (P1-1: PATCH DRAFT->IDENTITY_LOCKED é bloqueado por design, mesmo em
+        teste)."""
+        draft = (
+            await client.post(f"/avatars/{avatar['id']}/identity-lock", json={"identity_spec": {}})
+        ).json()
+        await client.post(
+            f"/avatars/{avatar['id']}/identity-lock/approve",
+            json={"expected_version": draft["version"], "approved_by": "marcos"},
+        )
+        response = await client.post(
+            f"/avatars/{avatar['id']}/quality-gates/identity/approve",
+            json={"expected_version": avatar["version"], "actor": "marcos"},
+        )
+        assert response.status_code == 200, response.text
+        updated_avatar = (await client.get(f"/avatars/{avatar['id']}")).json()
+        assert updated_avatar["status"] == "identity_locked"
+        return updated_avatar
+
+    return _advance
+
+
+async def _upload_and_approve(
+    client: httpx.AsyncClient,
+    avatar_id: str,
+    *,
+    category: str,
+    angle: int | None,
+    seed: int,
+) -> None:
+    data = {"category": category}
+    if angle is not None:
+        data["angle"] = str(angle)
+    files = {"file": ("ref.png", photo_bytes(seed), "image/png")}
+    uploaded = (
+        await client.post(f"/avatars/{avatar_id}/references", data=data, files=files)
+    ).json()
+    approved = await client.post(
+        f"/avatars/{avatar_id}/references/{uploaded['id']}/approve",
+        json={"expected_version": uploaded["version"], "reviewed_by": "marcos"},
+    )
+    assert approved.status_code == 200, approved.text
+
+
+@pytest.fixture
+def complete_full_multiview_and_approve() -> CompleteFullMultiview:
+    async def _complete(client: httpx.AsyncClient, avatar: dict) -> dict:
+        """Avatar já em MULTIVIEW_IN_PROGRESS -> sobe TODOS os 108 ângulos 360° + 32
+        especializadas + 19 expressões, aprova cada um, e então aprova o gate multiview
+        de verdade. Sem isso não existe outro jeito de alcançar MULTIVIEW_APPROVED
+        (P1-1) — é deliberadamente pesado, exatamente o que "sem bypass" custa."""
+        seed = 0
+        for category in ("head_360", "half_body_360", "full_body_360"):
+            for angle in REQUIRED_ANGLES:
+                seed += 1
+                await _upload_and_approve(
+                    client, avatar["id"], category=category, angle=angle, seed=seed
+                )
+        for category in SPECIALIZED_CATEGORIES:
+            seed += 1
+            await _upload_and_approve(
+                client, avatar["id"], category=category.value, angle=None, seed=seed
+            )
+        for category in EXPRESSION_CATEGORIES:
+            seed += 1
+            await _upload_and_approve(
+                client, avatar["id"], category=category.value, angle=None, seed=seed
+            )
+
+        response = await client.post(
+            f"/avatars/{avatar['id']}/quality-gates/multiview/approve",
+            json={"expected_version": avatar["version"], "actor": "marcos"},
+        )
+        assert response.status_code == 200, response.text
+        updated_avatar = (await client.get(f"/avatars/{avatar['id']}")).json()
+        assert updated_avatar["status"] == "multiview_approved"
+        return updated_avatar
+
+    return _complete

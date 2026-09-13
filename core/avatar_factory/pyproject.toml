@@ -1,0 +1,29 @@
+[project]
+name = "dhf-avatar-factory"
+version = "0.1.0"
+description = "Digital Human Factory — Avatar Factory Control Plane (Identity Lock, Multiview, Quality Gates)"
+requires-python = ">=3.11"
+dependencies = [
+    "dhf-shared",
+    "dhf-schemas",
+    "dhf-storage",
+    "dhf-avatars",
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    "sqlalchemy>=2.0",
+    "pillow>=10.4",
+    "python-multipart>=0.0.9",
+]
+
+[tool.uv.sources]
+dhf-shared = { workspace = true }
+dhf-schemas = { workspace = true }
+dhf-storage = { workspace = true }
+dhf-avatars = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dhf_avatar_factory"]

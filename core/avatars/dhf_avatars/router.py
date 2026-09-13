@@ -11,7 +11,11 @@ from dhf_avatars.repository import (
     AvatarVersionConflictError,
 )
 from dhf_avatars.schemas import Avatar, AvatarCreate, AvatarUpdate
-from dhf_avatars.service import AvatarDeleteBlockedError, InvalidStatusTransitionError
+from dhf_avatars.service import (
+    AvatarDeleteBlockedError,
+    GateProtectedStatusError,
+    InvalidStatusTransitionError,
+)
 
 router = APIRouter(prefix="/avatars", tags=["avatars"])
 
@@ -52,6 +56,15 @@ async def update_avatar(avatar_id: uuid.UUID, payload: AvatarUpdate) -> Avatar:
         raise HTTPException(
             status_code=409,
             detail=f"transição de status inválida: {exc.current} -> {exc.target}",
+        ) from exc
+    except GateProtectedStatusError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"status '{exc.status}' só pode ser alcançado aprovando o quality gate "
+                "correspondente (POST /avatars/{id}/quality-gates/{gate}/approve), não via "
+                "PATCH genérico"
+            ),
         ) from exc
 
 

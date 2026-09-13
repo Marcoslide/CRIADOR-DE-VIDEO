@@ -7,6 +7,7 @@ from dhf_avatars import repository
 from dhf_avatars.models import AvatarRecord
 from dhf_avatars.schemas import (
     ALLOWED_STATUS_TRANSITIONS,
+    GATE_PROTECTED_STATUSES,
     Avatar,
     AvatarCreate,
     AvatarStatus,
@@ -19,6 +20,19 @@ class InvalidStatusTransitionError(Exception):
         self.current = current
         self.target = target
         super().__init__(f"transição {current} -> {target} não é permitida")
+
+
+class GateProtectedStatusError(Exception):
+    """PATCH genérico tentou setar um status que só um quality gate aprovado pode alcançar
+    (P1-1). Distinta de `InvalidStatusTransitionError` para a API dar uma mensagem que
+    explique O CAMINHO CORRETO (aprovar o gate), não só "transição inválida"."""
+
+    def __init__(self, status: AvatarStatus) -> None:
+        self.status = status
+        super().__init__(
+            f"status '{status}' só pode ser alcançado aprovando o quality gate "
+            "correspondente, não via PATCH genérico"
+        )
 
 
 class AvatarDeleteBlockedError(Exception):
@@ -60,11 +74,11 @@ async def update_avatar(avatar_id: uuid.UUID, payload: AvatarUpdate) -> Avatar:
 
     if payload.status is not None:
         current_status = AvatarStatus(current.status)
-        if (
-            payload.status != current_status
-            and payload.status not in ALLOWED_STATUS_TRANSITIONS[current_status]
-        ):
-            raise InvalidStatusTransitionError(current_status, payload.status)
+        if payload.status != current_status:
+            if payload.status in GATE_PROTECTED_STATUSES:
+                raise GateProtectedStatusError(payload.status)
+            if payload.status not in ALLOWED_STATUS_TRANSITIONS[current_status]:
+                raise InvalidStatusTransitionError(current_status, payload.status)
 
     status = payload.status.value if payload.status is not None else None
     changed = any(

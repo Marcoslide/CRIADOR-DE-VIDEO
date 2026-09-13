@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from dhf_avatar_factory.router import router as avatar_factory_router
 from dhf_avatars.router import router as avatars_router
 from dhf_shared.config import get_settings
 from dhf_shared.db import get_engine
@@ -49,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(system_status.router)
     app.include_router(jobs.router)
     app.include_router(avatars_router)
+    app.include_router(avatar_factory_router)
     return app
 
 

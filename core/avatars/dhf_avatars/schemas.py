@@ -35,6 +35,26 @@ ALLOWED_STATUS_TRANSITIONS: dict[AvatarStatus, set[AvatarStatus]] = {
     status: ({_ORDER[i + 1]} if i + 1 < len(_ORDER) else set()) for i, status in enumerate(_ORDER)
 }
 
+# Statuses que só podem ser alcançados através de um Quality Gate aprovado com evidência
+# real (Avatar Factory Control Plane, seções 3-4) — nunca diretamente pelo PATCH genérico
+# abaixo, mesmo quando adjacentes na tabela acima. Definido aqui (não em dhf_avatar_factory)
+# porque `dhf_avatars` precisa recusar o bypass sozinho, mesmo sem o pacote do factory
+# instalado — a trava vive na camada mais baixa que existe, não num pacote opcional.
+GATE_PROTECTED_STATUSES: frozenset[AvatarStatus] = frozenset(
+    {
+        AvatarStatus.IDENTITY_LOCKED,
+        AvatarStatus.MULTIVIEW_APPROVED,
+        AvatarStatus.MESH_APPROVED,
+        AvatarStatus.RIGGED,
+        AvatarStatus.MATERIALS_APPROVED,
+        AvatarStatus.FACE_APPROVED,
+        AvatarStatus.VOICE_APPROVED,
+        AvatarStatus.MOTION_APPROVED,
+        AvatarStatus.MASTER_APPROVED,
+        AvatarStatus.PRODUCTION_READY,
+    }
+)
+
 
 class AvatarCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)

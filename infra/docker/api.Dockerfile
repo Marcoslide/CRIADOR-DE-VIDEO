@@ -11,13 +11,14 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /workspace
 
 # Só o necessário para resolver as dependências de dhf-api (e suas deps de workspace
-# dhf-shared/dhf-schemas/dhf-storage/dhf-avatars) — não precisa de
+# dhf-shared/dhf-schemas/dhf-storage/dhf-avatars/dhf-avatar-factory) — não precisa de
 # workers/job_worker nem do frontend aqui.
 COPY pyproject.toml uv.lock ./
 COPY packages/shared packages/shared
 COPY packages/schemas packages/schemas
 COPY services/storage services/storage
 COPY core/avatars core/avatars
+COPY core/avatar_factory core/avatar_factory
 COPY apps/api apps/api
 COPY migrations migrations
 COPY infra/docker/api-entrypoint.sh infra/docker/api-entrypoint.sh

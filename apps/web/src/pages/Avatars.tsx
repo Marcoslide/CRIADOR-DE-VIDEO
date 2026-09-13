@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Avatar, AvatarStatus } from "../api/types";
@@ -147,14 +148,23 @@ export function Avatars() {
                 <p className="mt-2 text-[11px] text-slate-600">
                   Atualizado {new Date(avatar.updated_at).toLocaleString("pt-BR")}
                 </p>
-                <button
-                  type="button"
-                  disabled={!target || advanceMutation.isPending}
-                  onClick={() => advanceMutation.mutate(avatar)}
-                  className="mt-3 w-full rounded-md border border-base-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-sky-500 hover:text-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {target ? `Avançar para ${target}` : "Produção liberada"}
-                </button>
+                <div className="mt-3 flex gap-2">
+                  <Link
+                    to={`/avatars/${avatar.id}/factory`}
+                    className="flex-1 rounded-md bg-sky-600 px-3 py-1.5 text-center text-xs font-medium text-white hover:bg-sky-500"
+                  >
+                    Avatar Factory
+                  </Link>
+                  <button
+                    type="button"
+                    disabled={!target || advanceMutation.isPending}
+                    onClick={() => advanceMutation.mutate(avatar)}
+                    title="Atalho de baixo nível — não passa pelos quality gates"
+                    className="flex-1 rounded-md border border-base-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-sky-500 hover:text-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {target ? `Avançar (manual)` : "Produção liberada"}
+                  </button>
+                </div>
               </div>
             );
           })}

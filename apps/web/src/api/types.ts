@@ -25,7 +25,15 @@ export interface ReadinessResponse {
 }
 
 // Espelha packages/schemas/dhf_schemas/storage.py
-export type StorageConnectionStatus = "not_configured" | "connecting" | "connected" | "degraded" | "error";
+export type StorageConnectionStatus =
+  | "not_configured"
+  | "auth_expired"
+  | "connecting"
+  | "connected"
+  | "degraded"
+  | "error";
+export type StorageAuthMode = "service_account" | "oauth_user";
+export type StorageDriveKind = "my_drive" | "shared_drive";
 
 export interface TreeValidationResult {
   expected: string[];
@@ -40,6 +48,8 @@ export interface StorageStatus {
   detail: string | null;
   error_code: string | null;
   root_folder_id: string | null;
+  auth_mode: StorageAuthMode | null;
+  drive_kind: StorageDriveKind | null;
   tree: TreeValidationResult | null;
   checked_at: string;
 }

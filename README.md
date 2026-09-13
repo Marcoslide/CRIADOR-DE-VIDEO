@@ -7,8 +7,9 @@ e quantidade.
 - Visão, fases e critérios de pronto: [`ROADMAP.md`](./ROADMAP.md)
 - Arquitetura, schemas e decisões técnicas: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
 
-Status atual: **Fase 1 (Foundation) concluída.** Fase 2 (Storage/Google Drive) com código
-completo, aguardando credencial real para ligar. Fase 3 (Avatar Registry) em fundação:
+Status atual: **Fase 1 (Foundation) e Fase 2 (Storage/Google Drive) concluídas.** OAuth
+`drive.file`, root criada pelo app, árvore 18/18 e contrato de arquivos foram validados no
+Drive real. Fase 3 (Avatar Registry) em fundação:
 CRUD real com máquina de estados, persistindo no PostgreSQL. Regra **zero fake** em vigor
 em todo o sistema: nenhuma integração aparece como conectada sem ter sido checada de
 verdade nesta requisição (`docs/ARCHITECTURE.md` §5) — o Dashboard mostra
@@ -182,7 +183,9 @@ Sem mocks nos testes de integração: eles sobem contra PostgreSQL/Redis/worker 
 após descartar e recriar todo o pool de conexões, equivalente à fronteira de persistência
 de um restart (`tests/api/test_avatars.py`). Os testes de
 `tests/storage/test_google_drive_integration.py` (marcados `integration`) precisam de uma
-credencial real do Google Drive e ficam `SKIPPED` sem ela — isso é esperado, não é falha.
+credencial OAuth User ou Service Account real e ficam `SKIPPED` sem ela — isso é esperado,
+não é falha. Quando habilitados, cobrem o contrato completo e uma retomada real de upload
+após falha de transporte injetada localmente.
 
 Outras checagens que o CI roda (ver `.github/workflows/ci.yml`) e que valem rodar antes de
 subir uma mudança:
@@ -232,8 +235,9 @@ inválida (a máquina de estados do Avatar Registry é linear, sem pular etapas 
 `core/avatars/dhf_avatars/schemas.py`).
 
 **Storage/OpenAI/GPU/Unreal aparecem como `NOT_CONFIGURED`/`NOT_INSTALLED`.**
-Esperado sem credencial/hardware configurado — é a regra zero fake em ação, não uma
-falha. Ver `docs/STORAGE_GOOGLE_DRIVE.md` para configurar o Google Drive.
+Esperado sem credencial/hardware configurado — é a regra zero fake em ação. O Storage
+também pode aparecer como `DEGRADED` quando a cota Google está esgotada. Ver
+`docs/STORAGE_GOOGLE_DRIVE.md`.
 
 ## Convenção de trabalho
 

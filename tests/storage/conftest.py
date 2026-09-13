@@ -1,11 +1,8 @@
 """Fixtures dos testes de Storage.
 
-`fake_service_account_file` gera uma credencial sintaticamente válida (chave RSA real,
-gerada na hora) mas não registrada em lugar nenhum — usada para exercitar o carregamento
-real de credencial sem depender de segredo nenhum. Os testes *unitários* além disso
-substituem `_get_token` para nunca tocar a rede (nem para renovar token); os testes de
-*integração* (`test_google_drive_integration.py`) usam uma credencial real de verdade e são
-pulados quando ela não está configurada.
+As fixtures geram credenciais OAuth/Service Account apenas sintaticamente válidas e sem
+segredo real. Os testes unitários substituem `_get_token` para nunca tocar a rede; os de
+integração usam OAuth real e são pulados quando ele não está configurado.
 """
 
 import json
@@ -40,9 +37,28 @@ def fake_service_account_file(tmp_path):
 
 
 @pytest.fixture
-def unit_settings(fake_service_account_file) -> GoogleDriveSettings:
+def fake_oauth_user_file(tmp_path):
+    path = tmp_path / "fake_oauth_user.json"
+    path.write_text(
+        json.dumps(
+            {
+                "token": "expired-access-token",
+                "refresh_token": "test-refresh-token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "test-client.apps.googleusercontent.com",
+                "client_secret": "test-client-secret",
+                "scopes": ["https://www.googleapis.com/auth/drive.file"],
+            }
+        )
+    )
+    return str(path)
+
+
+@pytest.fixture
+def unit_settings(fake_oauth_user_file) -> GoogleDriveSettings:
     return GoogleDriveSettings(
-        google_drive_service_account_file=fake_service_account_file,
+        google_drive_auth_mode="oauth_user",
+        google_drive_oauth_user_file=fake_oauth_user_file,
         google_drive_root_folder_id="root-folder-id",
         google_drive_max_retries=1,
         google_drive_retry_base_delay_s=0.001,
@@ -58,6 +74,16 @@ async def provider(unit_settings, monkeypatch):
         return "fake-access-token"
 
     monkeypatch.setattr(p, "_get_token", _fake_token)
+
+    async def _fake_quota(*args, **kwargs):
+        return {
+            "limit": 15 * 1024**3,
+            "usage": 1024,
+            "usage_in_drive": 1024,
+            "usage_in_drive_trash": 0,
+        }
+
+    monkeypatch.setattr("dhf_storage.google_drive.drive_api.get_storage_quota", _fake_quota)
     yield p
     await p.aclose()
 
@@ -67,5 +93,7 @@ def unconfigured_provider():
     settings = GoogleDriveSettings(
         google_drive_service_account_json="",
         google_drive_service_account_file="",
+        google_drive_oauth_user_json="",
+        google_drive_oauth_user_file="",
     )
     return GoogleDriveStorageProvider(settings)

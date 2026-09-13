@@ -12,6 +12,7 @@ function toPillState(state: EngineStatusValue | string | undefined, isError: boo
   if (state === "connected" || state === "ok") return "connected";
   if (state === "timeout") return "timeout";
   if (state === "not_configured" || state === "not_installed") return "not_configured";
+  if (state === "auth_expired") return "auth_expired";
   if (state === "connecting") return "connecting";
   if (state === "degraded") return "degraded";
   return "error";
@@ -20,6 +21,7 @@ function toPillState(state: EngineStatusValue | string | undefined, isError: boo
 function storageDetail(data: SystemStatusResponse | undefined): string {
   const storage = data?.storage;
   if (!storage) return "Google Drive — 18 pastas oficiais";
+  if (storage.status !== "connected" && storage.detail) return storage.detail;
   if (storage.tree) return `${storage.tree.found.length}/${storage.tree.expected.length} pastas oficiais encontradas`;
   return storage.detail ?? "Google Drive — 18 pastas oficiais";
 }
@@ -152,8 +154,8 @@ export function Dashboard() {
         <h2 className="text-sm font-medium uppercase tracking-wide text-slate-500">Fase atual</h2>
         <p className="mt-2 text-sm text-slate-300">
           <span className="font-semibold text-slate-100">Fase 1 — Foundation concluída.</span>{" "}
-          <span className="font-semibold text-slate-100">Fase 2 — Storage</span> com código
-          completo (Google Drive real, streaming, retry, proteção contra exclusão permanente).{" "}
+          <span className="font-semibold text-slate-100">Fase 2 — Storage concluída</span>{" "}
+          com Google Drive real, streaming, retry e proteção contra exclusão permanente.{" "}
           <span className="font-semibold text-slate-100">Fase 3 — Avatar Registry</span> em
           fundação: CRUD real com máquina de estados, persistindo no PostgreSQL. Os cards acima
           mostram <span className="text-slate-100">Não configurado</span> /{" "}

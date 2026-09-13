@@ -4,8 +4,8 @@ Trabalho **card por card** (seção 79 do prompt-mestre): cada fase abaixo vira 
 cards no Trello. Não avançamos para a fase N+1 sem a Definition of Done da fase N cumprida
 de verdade (seção 80) — nada é "concluído" só porque o código foi escrito.
 
-Status global: **FASE 1 concluída · FASE 2 (Storage) com código completo, validação real
-com credencial pendente.**
+Status global: **FASE 1 concluída · FASE 2 (Storage) concluída com OAuth `drive.file`,
+árvore 18/18 e contrato completo validado no Google Drive real.**
 
 ---
 
@@ -54,24 +54,24 @@ externas. Ver seções 6-10 deste documento.
 
 ---
 
-## FASE 2 — Storage 🟡 CÓDIGO COMPLETO · VALIDAÇÃO REAL PENDENTE DE CREDENCIAL
+## FASE 2 — Storage ✅ CONCLUÍDA
 
 - `StorageProvider` (interface, em `packages/schemas`) + `GoogleDriveStorageProvider` real
-  (`services/storage`) — service account, chamadas REST diretas (`httpx` + `google-auth`,
+  (`services/storage`) — OAuth User com escopo `drive.file`, chamadas REST diretas
+  (`httpx` + `google-auth`,
   não `google-api-python-client` — ver `docs/ARCHITECTURE.md` §4.4);
-- Árvore oficial **já criada manualmente no Drive** pelo usuário (18 pastas, raiz
-  `13BTUf5Oyp8fb_CT2H0OJ6LeuZKzm3pxE`) — o provider **descobre e valida por nome, nunca
-  cria/renomeia/apaga** as 18 pastas de topo. Substitui a estrutura lógica
-  `/AVATARS /VOICES /MOTIONS /...` cogitada antes de a árvore real existir — ver a lista
-  completa em `docs/STORAGE_GOOGLE_DRIVE.md`;
+- Bootstrap idempotente cria a root técnica `CRIADOR DE VIDEO — STORAGE`, marca-a com
+  `appProperties`, persiste/valida o ID e cria as 18 pastas oficiais. A pasta histórica
+  `CRIADOR DE VIDEO` não é tocada — ver `docs/STORAGE_GOOGLE_DRIVE.md`;
 - Subpastas abaixo de cada uma das 18 (convenção de caminho/versão dos callers) são
   descobertas/criadas idempotentemente;
 - Upload/download com streaming real (resumable upload, `alt=media` download em chunks);
 - Retry com backoff para 429/5xx, timeouts configuráveis, cache de IDs descobertos;
-- Estados `NOT_CONFIGURED / CONNECTING / CONNECTED / DEGRADED / ERROR` — `DEGRADED` quando
-  autentica mas a árvore não bate com a esperada;
-- Proteção contra exclusão permanente: `delete()` só apaga sem `allow_permanent=True` dentro
-  de `02_SISTEMA_STORAGE/_tmp/`;
+- Estados `NOT_CONFIGURED / AUTH_EXPIRED / CONNECTING / CONNECTED / DEGRADED / ERROR` —
+  `AUTH_EXPIRED` identifica `invalid_grant` sem retry infinito;
+- Proteção contra exclusão permanente: `delete()` só envia à lixeira sem
+  `allow_permanent=True` dentro de `02_SISTEMA_STORAGE/_tmp/` ou da área isolada
+  `_integration_tests/<uuid>/`;
 - `GET /storage/status` na API; CLI `dhf-storage check` (conexão + árvore);
 - Testes unitários (mockados, `respx`) e testes de integração reais (separados, só rodam com
   credencial real configurada).
@@ -92,15 +92,14 @@ externas. Ver seções 6-10 deste documento.
 **Pendente nesta fase** (não pedido nos cards de Storage, registrado para não perder o
 fio): rotina de backup do PostgreSQL para o Drive (seção 65) — ainda não implementada.
 
-**Depende de:** credencial Google Drive real (service account) para a validação ao vivo —
-ver `docs/ARCHITECTURE.md` §10. Sem ela, o provider reporta `NOT_CONFIGURED` honestamente;
-código e testes unitários já estão prontos e passam sem credencial.
-**DoD:** upload real, download real, arquivo baixado é byte-idêntico ao enviado, erro de
-rede tratado e reportado, sync testado com arquivo real — **ainda não cumprido, mesmo após
-a rodada de hardening**: falta a credencial real para rodar os testes de integração
-(`tests/storage/test_google_drive_integration.py`, hoje `SKIPPED`). **A Fase 2 não está
-concluída** até esses testes rodarem de verdade. Ver relatório da sessão para o estado
-exato.
+**Validação real concluída:** OAuth User + `drive.file` autorizado, root criada pelo app,
+ID persistido, árvore oficial 18/18 e bootstrap idempotente. A suíte ao vivo comprovou
+upload resumable, download atômico byte-idêntico, checksum, exists, list, metadata, copy,
+move/rename, lixeira segura, sync idempotente e retomada após perda de resposta. Todas as
+mutações ficaram em `_integration_tests/<uuid>` e foram limpas de forma recuperável.
+
+**DoD cumprido:** `tests/storage/test_google_drive_integration.py` passou integralmente
+contra o My Drive real; health final `CONNECTED`.
 
 ## FASE 3 — Avatar Registry
 

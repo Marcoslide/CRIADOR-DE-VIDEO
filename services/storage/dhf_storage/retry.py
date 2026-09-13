@@ -51,7 +51,12 @@ async def with_retry(
                 attempt=attempt + 1,
                 max_retries=max_retries,
                 delay_s=round(delay, 2),
-                error=str(last_error),
+                error_type=type(last_error).__name__,
+                status_code=(
+                    last_error.response.status_code
+                    if isinstance(last_error, httpx.HTTPStatusError)
+                    else None
+                ),
             )
         await asyncio.sleep(delay)
 

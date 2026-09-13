@@ -5,6 +5,7 @@ export type PillState =
   | "error"
   | "timeout"
   | "not_configured"
+  | "auth_expired"
   | "checking"
   | "connecting"
   | "degraded";
@@ -29,6 +30,11 @@ const STYLES: Record<PillState, { label: string; className: string; icon: React.
     label: "Não configurado",
     className: "bg-slate-500/10 text-slate-400 ring-slate-500/30",
     icon: <CircleSlash size={14} />,
+  },
+  auth_expired: {
+    label: "Autorização expirada",
+    className: "bg-red-500/10 text-red-400 ring-red-500/30",
+    icon: <AlertTriangle size={14} />,
   },
   checking: {
     label: "Verificando…",

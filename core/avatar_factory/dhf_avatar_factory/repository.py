@@ -1,13 +1,18 @@
 """Acesso a dados do Avatar Factory Control Plane — só SQL/ORM aqui, nenhuma regra de
 negócio (isso é `service.py`). Mesmo padrão de `dhf_avatars.repository`: cada função abre
 e fecha sua própria sessão via `get_sessionmaker()`, sem depender do request scope do
-FastAPI (repositórios também precisam funcionar fora de uma requisição, ex.: workers)."""
+FastAPI (repositórios também precisam funcionar fora de uma requisição, ex.: workers) —
+EXCETO as funções `*_atomic` (P1-4), que deliberadamente fazem várias escritas dentro de
+uma ÚNICA sessão/transação porque precisam de tudo-ou-nada: aprovar um gate nunca pode
+deixar o gate em PASS com o avatar ainda no status antigo (ou vice-versa)."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
 
+from dhf_avatars.models import AvatarRecord
+from dhf_avatars.repository import AvatarNotFoundError, AvatarVersionConflictError
 from dhf_shared.db import get_sessionmaker
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -96,6 +101,24 @@ async def get_current_identity_lock(avatar_id: uuid.UUID) -> IdentityLockRecord 
         )
 
 
+async def get_latest_approved_identity_lock(avatar_id: uuid.UUID) -> IdentityLockRecord | None:
+    """A identidade OFICIAL vigente do avatar (P1-5 — lineage): a versão de maior
+    `identity_version` com status='approved'. Um draft mais novo em andamento NÃO muda
+    isto até ser aprovado — enquanto isso, capturas/gates continuam contra a geração
+    aprovada anterior, nunca contra um rascunho ainda não confirmado."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await session.scalar(
+            select(IdentityLockRecord)
+            .where(
+                IdentityLockRecord.avatar_id == avatar_id,
+                IdentityLockRecord.status == "approved",
+            )
+            .order_by(IdentityLockRecord.identity_version.desc())
+            .limit(1)
+        )
+
+
 async def create_identity_lock_draft(
     avatar_id: uuid.UUID,
     *,
@@ -164,10 +187,14 @@ async def update_identity_lock_draft(
 
 async def approve_identity_lock(
     lock_id: uuid.UUID, *, approved_by: str, expected_version: int
-) -> IdentityLockRecord:
-    """Aprova o lock e, na mesma operação, marca qualquer lock approved anterior deste
-    avatar como superseded — nunca existe mais de um lock 'approved' simultâneo, e o
-    anterior nunca é apagado nem sobrescrito, só rotulado."""
+) -> tuple[IdentityLockRecord, int]:
+    """Aprova o lock e, na mesma transação: (1) marca qualquer lock approved anterior
+    deste avatar como superseded — nunca existe mais de um lock 'approved' simultâneo, e
+    o anterior nunca é apagado nem sobrescrito, só rotulado; (2) se isto abre uma NOVA
+    geração de identidade (P1-5), reseta para NOT_TESTED todo QualityGateRecord que ainda
+    representava a geração anterior — nenhuma evidência antiga (gate PASS, DerivedAsset
+    GENERATED) sobrevive silenciosamente para a nova versão. Devolve o lock e o
+    `avatar_version_group` vigente após a operação."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         target = await session.get(IdentityLockRecord, lock_id)
@@ -177,6 +204,14 @@ async def approve_identity_lock(
             raise IdentityLockVersionConflictError(lock_id, expected_version)
         if target.status != "draft":
             raise IdentityLockNotDraftError
+
+        previous_approved = await session.scalar(
+            select(IdentityLockRecord).where(
+                IdentityLockRecord.avatar_id == target.avatar_id,
+                IdentityLockRecord.status == "approved",
+            )
+        )
+        previous_version_group = previous_approved.identity_version if previous_approved else 1
 
         await session.execute(
             update(IdentityLockRecord)
@@ -199,8 +234,29 @@ async def approve_identity_lock(
             .returning(IdentityLockRecord)
         )
         record = (await session.execute(statement)).scalar_one()
+        new_version_group = record.identity_version
+
+        if new_version_group > previous_version_group:
+            # Nova geração de identidade: nenhum gate (inclusive 'identity', que precisa
+            # ser re-aprovado explicitamente para esta versão) herda PASS da anterior.
+            stale_gates = await session.scalars(
+                select(QualityGateRecord).where(
+                    QualityGateRecord.avatar_id == target.avatar_id,
+                    QualityGateRecord.avatar_version_group < new_version_group,
+                )
+            )
+            for gate in stale_gates:
+                gate.status = "not_tested"
+                gate.avatar_version_group = new_version_group
+                gate.reason = None
+                gate.evidence = None
+                gate.approved_by = None
+                gate.approved_at = None
+                gate.version = gate.version + 1
+                gate.updated_at = func.now()
+
         await session.commit()
-        return record
+        return record, new_version_group
 
 
 # --- Reference Assets ---------------------------------------------------------------------
@@ -209,6 +265,7 @@ async def approve_identity_lock(
 async def create_reference_asset(
     avatar_id: uuid.UUID,
     *,
+    id: uuid.UUID,
     capture_version: int,
     category: str,
     angle: int | None,
@@ -226,9 +283,13 @@ async def create_reference_asset(
     qa_status: str,
     qa_detail: dict[str, Any] | None,
 ) -> ReferenceAssetRecord:
+    """`id` é gerado pelo chamador (`service.upload_reference_asset`) ANTES do upload ao
+    Storage — P1-3: o path remoto do binário inclui esse mesmo UUID, então o INSERT aqui
+    só confirma o vínculo, nunca gera um id novo que pudesse divergir do path já usado."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         record = ReferenceAssetRecord(
+            id=id,
             avatar_id=avatar_id,
             capture_version=capture_version,
             category=category,
@@ -333,35 +394,6 @@ async def review_reference_asset(
 # --- Histórico de transição de status (append-only) ----------------------------------------
 
 
-async def create_state_transition(
-    avatar_id: uuid.UUID,
-    *,
-    from_status: str,
-    to_status: str,
-    actor: str | None,
-    reason: str | None,
-    evidence: dict[str, Any] | None,
-    quality_gate: str | None,
-    avatar_version: int,
-) -> AvatarStateTransitionRecord:
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        record = AvatarStateTransitionRecord(
-            avatar_id=avatar_id,
-            from_status=from_status,
-            to_status=to_status,
-            actor=actor,
-            reason=reason,
-            evidence=evidence,
-            quality_gate=quality_gate,
-            avatar_version=avatar_version,
-        )
-        session.add(record)
-        await session.commit()
-        await session.refresh(record)
-        return record
-
-
 async def list_state_transitions(avatar_id: uuid.UUID) -> list[AvatarStateTransitionRecord]:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -387,7 +419,7 @@ async def get_gate(avatar_id: uuid.UUID, gate_name: str) -> QualityGateRecord | 
 
 
 async def get_or_create_gate(
-    avatar_id: uuid.UUID, gate_name: str, *, checklist: dict[str, str]
+    avatar_id: uuid.UUID, gate_name: str, *, version_group: int, checklist: dict[str, str]
 ) -> QualityGateRecord:
     existing = await get_gate(avatar_id, gate_name)
     if existing is not None:
@@ -395,7 +427,11 @@ async def get_or_create_gate(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         record = QualityGateRecord(
-            avatar_id=avatar_id, gate_name=gate_name, status="not_tested", checklist=checklist
+            avatar_id=avatar_id,
+            gate_name=gate_name,
+            avatar_version_group=version_group,
+            status="not_tested",
+            checklist=checklist,
         )
         session.add(record)
         try:
@@ -467,6 +503,7 @@ async def create_gate_decision(
     action: str,
     previous_status: str,
     new_status: str,
+    avatar_version_group: int,
     actor: str | None,
     reason: str | None,
     evidence: dict[str, Any] | None,
@@ -479,6 +516,7 @@ async def create_gate_decision(
             action=action,
             previous_status=previous_status,
             new_status=new_status,
+            avatar_version_group=avatar_version_group,
             actor=actor,
             reason=reason,
             evidence=evidence,
@@ -489,24 +527,187 @@ async def create_gate_decision(
         return record
 
 
+# --- Transação atômica de aprovação/rejeição de gate (P1-4) --------------------------------
+
+
+async def approve_gate_atomic(
+    avatar_id: uuid.UUID,
+    *,
+    gate_name: str,
+    current_status: str,
+    target_status: str,
+    expected_avatar_version: int,
+    version_group: int,
+    checklist: dict[str, str],
+    reason: str | None,
+    actor: str,
+    evidence: dict[str, Any] | None,
+) -> tuple[QualityGateRecord, AvatarStateTransitionRecord, AvatarRecord]:
+    """Uma ÚNICA transação para: (1) travar/checar o avatar via optimistic lock e já
+    avançar seu status; (2) obter-ou-criar o gate; (3) marcá-lo PASS; (4) registrar a
+    decisão; (5) registrar a transição de status; (6) COMMIT único. Qualquer falha antes
+    do commit (inclusive o avatar não ter mais a `expected_avatar_version` esperada)
+    desfaz TUDO — nunca um gate fica PASS sem o avatar ter avançado, nem o contrário.
+
+    O avatar é atualizado PRIMEIRO (antes de tocar no gate) deliberadamente: se outra
+    requisição já mudou o avatar nesse meio-tempo, a transação inteira aborta aqui, antes
+    de qualquer escrita em `avatar_quality_gates`/`avatar_quality_gate_decisions` — não
+    existe cenário em que o gate seja escrito e o avatar não."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        avatar_statement = (
+            update(AvatarRecord)
+            .where(AvatarRecord.id == avatar_id, AvatarRecord.version == expected_avatar_version)
+            .values(status=target_status, version=AvatarRecord.version + 1, updated_at=func.now())
+            .returning(AvatarRecord)
+        )
+        avatar_record = (await session.execute(avatar_statement)).scalar_one_or_none()
+        if avatar_record is None:
+            exists = await session.scalar(
+                select(AvatarRecord.id).where(AvatarRecord.id == avatar_id)
+            )
+            if exists is None:
+                raise AvatarNotFoundError(avatar_id)
+            raise AvatarVersionConflictError(avatar_id, expected_avatar_version)
+
+        gate = await session.scalar(
+            select(QualityGateRecord).where(
+                QualityGateRecord.avatar_id == avatar_id, QualityGateRecord.gate_name == gate_name
+            )
+        )
+        if gate is None:
+            gate = QualityGateRecord(
+                avatar_id=avatar_id,
+                gate_name=gate_name,
+                avatar_version_group=version_group,
+                status="not_tested",
+                checklist=checklist,
+            )
+            session.add(gate)
+            await session.flush()
+
+        previous_gate_status = gate.status
+        gate.status = "pass"
+        gate.avatar_version_group = version_group
+        gate.reason = reason
+        gate.evidence = evidence
+        gate.approved_by = actor
+        gate.approved_at = func.now()
+        gate.version = gate.version + 1
+        gate.updated_at = func.now()
+
+        decision = QualityGateDecisionRecord(
+            avatar_id=avatar_id,
+            gate_name=gate_name,
+            action="approve",
+            previous_status=previous_gate_status,
+            new_status="pass",
+            avatar_version_group=version_group,
+            actor=actor,
+            reason=reason,
+            evidence=evidence,
+        )
+        session.add(decision)
+
+        transition = AvatarStateTransitionRecord(
+            avatar_id=avatar_id,
+            from_status=current_status,
+            to_status=target_status,
+            actor=actor,
+            reason=reason,
+            evidence=evidence,
+            quality_gate=gate_name,
+            avatar_version=avatar_record.version,
+        )
+        session.add(transition)
+
+        await session.commit()
+        await session.refresh(gate)
+        await session.refresh(transition)
+        await session.refresh(avatar_record)
+        return gate, transition, avatar_record
+
+
+async def reject_gate_atomic(
+    avatar_id: uuid.UUID,
+    *,
+    gate_name: str,
+    version_group: int,
+    checklist: dict[str, str],
+    reason: str | None,
+    actor: str,
+    evidence: dict[str, Any] | None,
+) -> QualityGateRecord:
+    """Mesma filosofia atômica do approve (P1-4) para a operação correlacionada de
+    rejeitar: update do gate + insert da decisão num commit só."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        gate = await session.scalar(
+            select(QualityGateRecord).where(
+                QualityGateRecord.avatar_id == avatar_id, QualityGateRecord.gate_name == gate_name
+            )
+        )
+        if gate is None:
+            gate = QualityGateRecord(
+                avatar_id=avatar_id,
+                gate_name=gate_name,
+                avatar_version_group=version_group,
+                status="not_tested",
+                checklist=checklist,
+            )
+            session.add(gate)
+            await session.flush()
+
+        previous_gate_status = gate.status
+        gate.status = "fail"
+        gate.reason = reason
+        gate.evidence = evidence
+        gate.approved_by = None
+        gate.approved_at = None
+        gate.version = gate.version + 1
+        gate.updated_at = func.now()
+
+        decision = QualityGateDecisionRecord(
+            avatar_id=avatar_id,
+            gate_name=gate_name,
+            action="reject",
+            previous_status=previous_gate_status,
+            new_status="fail",
+            avatar_version_group=gate.avatar_version_group,
+            actor=actor,
+            reason=reason,
+            evidence=evidence,
+        )
+        session.add(decision)
+
+        await session.commit()
+        await session.refresh(gate)
+        return gate
+
+
 # --- Derived Assets / Job Contracts (placeholders, seções 19-21) ---------------------------
 
 
-async def list_derived_assets(avatar_id: uuid.UUID) -> list[DerivedAssetRecord]:
+async def list_derived_assets(
+    avatar_id: uuid.UUID, *, version_group: int | None = None
+) -> list[DerivedAssetRecord]:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        result = await session.scalars(
-            select(DerivedAssetRecord).where(DerivedAssetRecord.avatar_id == avatar_id)
-        )
+        statement = select(DerivedAssetRecord).where(DerivedAssetRecord.avatar_id == avatar_id)
+        if version_group is not None:
+            statement = statement.where(DerivedAssetRecord.avatar_version_group == version_group)
+        result = await session.scalars(statement)
         return list(result)
 
 
 async def ensure_derived_asset_placeholders(
     avatar_id: uuid.UUID, *, avatar_version_group: int
 ) -> list[DerivedAssetRecord]:
-    """Garante uma linha NOT_GENERATED por tipo (seção 19) — idempotente, nunca duplica
-    se já existir alguma linha para este avatar."""
-    existing = await list_derived_assets(avatar_id)
+    """Garante uma linha NOT_GENERATED por tipo PARA A GERAÇÃO ATUAL (seção 19, P1-5) —
+    idempotente por version_group; nunca apaga nem reaproveita linhas de uma geração
+    anterior (essas continuam existindo como histórico, mas não contam para o gate atual,
+    já que `check_gpu_dependent_gate` só recebe as do `avatar_version_group` vigente)."""
+    existing = await list_derived_assets(avatar_id, version_group=avatar_version_group)
     if existing:
         return existing
     sessionmaker = get_sessionmaker()

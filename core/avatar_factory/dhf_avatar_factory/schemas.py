@@ -257,6 +257,7 @@ class QualityGateDecision(BaseModel):
     action: GateDecisionAction
     previous_status: QualityGateStatus
     new_status: QualityGateStatus
+    avatar_version_group: int
     actor: str | None
     reason: str | None
     evidence: dict[str, Any] | None

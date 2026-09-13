@@ -44,10 +44,18 @@ def _slot_state(asset: ReferenceAssetRecord | None) -> str:
     return "approved" if asset.approved else asset.upload_state
 
 
-def compute_multiview_completeness(assets: list[ReferenceAssetRecord]) -> MultiviewCompleteness:
+def compute_multiview_completeness(
+    assets: list[ReferenceAssetRecord], *, capture_version: int
+) -> MultiviewCompleteness:
     """Cálculo de progresso (seção 16) — cabeça/meio-corpo/corpo-inteiro em 36 posições
-    cada, mais as listas de referências especializadas e expression master set."""
-    latest = _latest_by_slot(assets)
+    cada, mais as listas de referências especializadas e expression master set.
+
+    `capture_version` restringe o cálculo à geração de captura ATUAL (P1-5 — lineage):
+    assets de uma `capture_version` mais antiga (de antes de uma nova Identity aprovada)
+    nunca contam como evidência para o multiview gate da geração atual, mesmo que ainda
+    existam no banco como histórico."""
+    current_generation = [asset for asset in assets if asset.capture_version == capture_version]
+    latest = _latest_by_slot(current_generation)
 
     def family_progress(category: ReferenceAssetCategory) -> MultiviewFamilyProgress:
         slots: list[AngleSlot] = []
@@ -122,7 +130,10 @@ def check_identity_gate(identity_lock: IdentityLockRecord | None) -> GateRequire
 
 
 def check_multiview_gate(
-    identity_lock: IdentityLockRecord | None, assets: list[ReferenceAssetRecord]
+    identity_lock: IdentityLockRecord | None,
+    assets: list[ReferenceAssetRecord],
+    *,
+    capture_version: int,
 ) -> GateRequirementCheck:
     """MULTIVIEW_APPROVED só acontece quando (seção 17): assets obrigatórios completos,
     QA críticos aprovados, nenhuma rejeição aberta, Identity Lock aprovado — a aprovação
@@ -132,7 +143,7 @@ def check_multiview_gate(
     if not check_identity_gate(identity_lock).satisfied:
         missing.append("Identity Lock precisa estar approved antes do multiview")
 
-    completeness = compute_multiview_completeness(assets)
+    completeness = compute_multiview_completeness(assets, capture_version=capture_version)
     for label, family in (
         ("head_360", completeness.head_360),
         ("half_body_360", completeness.half_body_360),

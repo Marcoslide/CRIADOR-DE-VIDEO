@@ -6,7 +6,8 @@ from __future__ import annotations
 import uuid
 
 from dhf_avatars.repository import AvatarNotFoundError, AvatarVersionConflictError
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from dhf_avatar_factory import service
 from dhf_avatar_factory.enums import QualityGateName, ReferenceAssetCategory
@@ -49,6 +50,22 @@ def _version_conflict(expected_version: int) -> HTTPException:
         status_code=409,
         detail=f"recurso alterado por outra operação; versão esperada: {expected_version}",
     )
+
+
+_UPLOAD_READ_CHUNK = 1024 * 1024  # 1MB por vez
+
+
+async def _read_upload_with_limit(file: UploadFile, *, max_bytes: int) -> bytes:
+    """Lê em pedaços e aborta assim que ultrapassa `max_bytes` (P2) — um upload de
+    vários GB nunca é lido por inteiro só para ser rejeitado depois."""
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(_UPLOAD_READ_CHUNK):
+        total += len(chunk)
+        if total > max_bytes:
+            raise service.UploadTooLargeError(max_bytes)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # --- Identity Lock ------------------------------------------------------------------------
@@ -104,6 +121,10 @@ async def upload_reference(
     source: str | None = Form(default=None),
     file: UploadFile = File(...),
 ) -> ReferenceAsset:
+    if file.content_type is not None and not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=422, detail=f"tipo de arquivo '{file.content_type}' não é uma imagem"
+        )
     metadata = ReferenceAssetMetadataIn(
         category=category,
         angle=angle,
@@ -112,8 +133,8 @@ async def upload_reference(
         orientation=orientation,
         source=source,
     )
-    data = await file.read()
     try:
+        data = await _read_upload_with_limit(file, max_bytes=service.MAX_UPLOAD_SIZE_BYTES)
         return await service.upload_reference_asset(
             avatar_id, metadata=metadata, filename=file.filename or "upload.jpg", data=data
         )
@@ -121,6 +142,10 @@ async def upload_reference(
         raise _avatar_not_found() from exc
     except service.InvalidReferenceAssetError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except service.UploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=413, detail=f"upload excede o limite de {exc.max_bytes} bytes"
+        ) from exc
 
 
 @router.get("/{avatar_id}/references", response_model=list[ReferenceAsset])
@@ -136,9 +161,8 @@ async def list_references(
 async def approve_reference(
     avatar_id: uuid.UUID, asset_id: uuid.UUID, payload: ReferenceAssetApprove
 ) -> ReferenceAsset:
-    del avatar_id  # avatar_id na URL é só para RESTfulness — asset_id já é a chave real
     try:
-        return await service.approve_reference_asset(asset_id, payload)
+        return await service.approve_reference_asset(avatar_id, asset_id, payload)
     except ReferenceAssetNotFoundError as exc:
         raise HTTPException(status_code=404, detail="reference asset não encontrado") from exc
     except ReferenceAssetVersionConflictError as exc:
@@ -149,9 +173,8 @@ async def approve_reference(
 async def reject_reference(
     avatar_id: uuid.UUID, asset_id: uuid.UUID, payload: ReferenceAssetReject
 ) -> ReferenceAsset:
-    del avatar_id
     try:
-        return await service.reject_reference_asset(asset_id, payload)
+        return await service.reject_reference_asset(avatar_id, asset_id, payload)
     except ReferenceAssetNotFoundError as exc:
         raise HTTPException(status_code=404, detail="reference asset não encontrado") from exc
     except ReferenceAssetVersionConflictError as exc:
@@ -159,15 +182,19 @@ async def reject_reference(
 
 
 @router.get("/{avatar_id}/references/{asset_id}/content")
-async def get_reference_content(avatar_id: uuid.UUID, asset_id: uuid.UUID) -> Response:
+async def get_reference_content(avatar_id: uuid.UUID, asset_id: uuid.UUID) -> StreamingResponse:
     """Proxy do binário guardado no Storage — o viewer 360 do frontend nunca fala com o
-    Google Drive diretamente (seção 29)."""
-    del avatar_id
+    Google Drive diretamente (seção 29). Streaming (P2): o binário nunca é carregado
+    inteiro em RAM aqui, só lido em pedaços de `dhf_avatar_factory.service` diretamente
+    do arquivo temporário para a resposta HTTP."""
     try:
-        data, mime_type = await service.get_reference_asset_content(asset_id)
+        tmp_path, mime_type = await service.get_reference_asset_content(avatar_id, asset_id)
     except ReferenceAssetNotFoundError as exc:
         raise HTTPException(status_code=404, detail="reference asset não encontrado") from exc
-    return Response(content=data, media_type=mime_type)
+    return StreamingResponse(
+        service.stream_file_and_cleanup(tmp_path, chunk_size=service.CONTENT_PROXY_CHUNK_SIZE),
+        media_type=mime_type,
+    )
 
 
 @router.get("/{avatar_id}/multiview", response_model=MultiviewCompleteness)

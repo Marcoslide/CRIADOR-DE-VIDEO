@@ -224,6 +224,10 @@ class QualityGateDecisionRecord(Base):
     action: Mapped[str] = mapped_column(String(20), nullable=False)
     previous_status: Mapped[str] = mapped_column(String(20), nullable=False)
     new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # A qual geração de identidade (seção 18 / P1-5) esta decisão pertence — preserva o
+    # rastro de qual version group estava "PASS" mesmo depois que `QualityGateRecord` é
+    # resetado para NOT_TESTED por uma nova identidade aprovada.
+    avatar_version_group: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     actor: Mapped[str | None] = mapped_column(String(200), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

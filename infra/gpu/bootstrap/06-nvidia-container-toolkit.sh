@@ -55,7 +55,7 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
     record_result "docker_gpu_test" NOT_TESTED "dry-run"
 elif has_nvidia_gpu; then
-    CUDA_TAG="${CUDA_TOOLKIT_VERSION:-13.4}.0-base-ubuntu24.04"
+    CUDA_TAG="${CUDA_TOOLKIT_VERSION:-12.9}.0-base-ubuntu24.04"
     if docker run --rm --gpus all "nvidia/cuda:$CUDA_TAG" nvidia-smi >/dev/null 2>&1; then
         record_result "docker_gpu_test" PASS "container 'nvidia/cuda:$CUDA_TAG' viu a GPU corretamente"
     else

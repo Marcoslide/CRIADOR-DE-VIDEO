@@ -27,7 +27,7 @@ else
     fi
 fi
 
-CUDA_TAG="${PYTORCH_CUDA_INDEX_TAG:-cu130}"
+CUDA_TAG="${PYTORCH_CUDA_INDEX_TAG:-cu128}"
 CURRENT_TORCH="$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || true)"
 if [ -n "$CURRENT_TORCH" ]; then
     record_result "pytorch_pacote" PASS "SKIP — torch $CURRENT_TORCH já instalado"

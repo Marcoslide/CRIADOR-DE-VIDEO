@@ -119,3 +119,48 @@ load_versions() {
         log_warn "config/versions.env não encontrado — usando defaults embutidos nos scripts."
     fi
 }
+
+# --- comparação de versões dotted (ex.: "12.9" vs "12.8.0") --------------------------
+# Baseado em `sort -V` (GNU coreutils version sort) — evita depender de python/awk-semver
+# só para comparar "X.Y[.Z]" em bash. Usado pelas checagens de faixa de compatibilidade
+# do Audio2Face-3D SDK (CUDA/TensorRT) em audio2face/verify-requirements.sh.
+
+# version_ge A B — verdadeiro se A >= B
+version_ge() {
+    [ "$1" = "$2" ] && return 0
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+}
+
+# version_lt A B — verdadeiro se A < B
+version_lt() {
+    ! version_ge "$1" "$2"
+}
+
+# version_in_range VERSAO MIN MAX_EXCLUSIVE — verdadeiro se MIN <= VERSAO < MAX_EXCLUSIVE
+version_in_range() {
+    local version="$1" min="$2" max_exclusive="$3"
+    version_ge "$version" "$min" && version_lt "$version" "$max_exclusive"
+}
+
+# cuda_installed_version — extrai "X.Y" de `nvcc --version` (mesma localização que
+# 03-cuda.sh usa: PATH primeiro, depois /usr/local/cuda/bin/nvcc). String vazia (e
+# status de saída 1) se nvcc não for encontrado — nunca inventa uma versão.
+cuda_installed_version() {
+    local nvcc_bin=""
+    if command_exists nvcc; then
+        nvcc_bin="$(command -v nvcc)"
+    elif [ -x /usr/local/cuda/bin/nvcc ]; then
+        nvcc_bin="/usr/local/cuda/bin/nvcc"
+    else
+        return 1
+    fi
+    "$nvcc_bin" --version 2>/dev/null | grep -oE 'release [0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | awk '{print $2}'
+}
+
+# tensorrt_installed_version — versão do pacote Python `tensorrt` (mesmo interpretador
+# que 08-python-ai.sh usa para instalar). String vazia (e status de saída 1) se o
+# pacote não estiver importável.
+tensorrt_installed_version() {
+    command_exists python3 || return 1
+    python3 -c 'import tensorrt; print(tensorrt.__version__)' 2>/dev/null
+}

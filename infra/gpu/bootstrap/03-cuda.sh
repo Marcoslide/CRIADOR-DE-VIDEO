@@ -14,7 +14,7 @@ parse_common_args "$@"
 require_linux
 load_versions
 
-PACKAGE="${CUDA_TOOLKIT_APT_PACKAGE:-cuda-toolkit-13-4}"
+PACKAGE="${CUDA_TOOLKIT_APT_PACKAGE:-cuda-toolkit-12-9}"
 
 log_info "=== FASE B / CUDA Toolkit ($PACKAGE) ==="
 

@@ -49,7 +49,7 @@ def test_detect_capabilities_parses_real_nvidia_smi_csv_line(
             return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
         if cmd[0] == "nvcc":
             return subprocess.CompletedProcess(
-                cmd, 0, stdout="Cuda compilation tools, release 13.4, V13.4.106\n", stderr=""
+                cmd, 0, stdout="Cuda compilation tools, release 12.9, V12.9.41\n", stderr=""
             )
         if cmd[0] == "python3":
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="ModuleNotFoundError")
@@ -74,7 +74,7 @@ def test_detect_capabilities_parses_real_nvidia_smi_csv_line(
     assert caps.vram_free_mb == 23800.0
     assert caps.temperature_c == 45.0
     assert caps.cuda_capability == "8.9"
-    assert caps.cuda_version == "13.4"
+    assert caps.cuda_version == "12.9"
     assert caps.has_nvenc is True
     assert "h264_nvenc" in caps.nvenc_codecs
     assert "hevc_nvenc" in caps.nvenc_codecs

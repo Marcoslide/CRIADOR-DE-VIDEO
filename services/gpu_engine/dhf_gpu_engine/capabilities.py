@@ -49,7 +49,7 @@ def _detect_cuda_version() -> str | None:
     if proc and proc.returncode == 0:
         for line in proc.stdout.splitlines():
             if "release" in line:
-                # ex.: "Cuda compilation tools, release 13.4, V13.4.106"
+                # ex.: "Cuda compilation tools, release 12.9, V12.9.41"
                 parts = line.split("release")[-1].strip().split(",")
                 return parts[0].strip()
     return None

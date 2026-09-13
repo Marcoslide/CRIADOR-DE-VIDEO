@@ -116,15 +116,18 @@ As duas transições que só "iniciam trabalho" (`identity_locked→multiview_in
 `multiview_approved→mesh_in_progress`) não têm gate — nada para aprovar ainda; seguem
 pelo `PATCH /avatars/{id}` genérico, exatamente como antes desta missão.
 
-`POST .../quality-gates/{gate}/approve`:
-1. Confere adjacência (`target_status` precisa ser o próximo permitido a partir do
-   status atual) — reaproveita `ALLOWED_STATUS_TRANSITIONS` de `dhf_avatars`.
-2. Busca os dados reais (`IdentityLock`, `ReferenceAsset`s ou `DerivedAsset`s conforme o
-   gate) e chama `gate_requirements.check_*_gate()` — nunca aprova sem requisito
-   satisfeito de verdade.
-3. Se satisfeito: grava a decisão (append-only), avança `AvatarRecord.status`
-   reutilizando `dhf_avatars.repository.update_avatar` (mesmo lock otimista) e grava a
-   transição (append-only) com o `quality_gate` que autorizou.
+`POST .../quality-gates/{gate}/approve` — tudo dentro de UMA transação atômica
+(`repository.approve_gate_atomic`, ver seção de concorrência abaixo):
+1. Locka o avatar (`SELECT ... FOR UPDATE`) e confere adjacência (`target_status` precisa
+   ser o próximo permitido a partir do status atual) — reaproveita
+   `ALLOWED_STATUS_TRANSITIONS` de `dhf_avatars`.
+2. Resolve a version lineage vigente (identity lock aprovado, também lockado) e busca os
+   dados reais (`IdentityLock`, `ReferenceAsset`s ou `DerivedAsset`s conforme o gate, todos
+   com `FOR UPDATE`) para chamar `gate_requirements.check_*_gate()` — nunca aprova sem
+   requisito satisfeito de verdade, e nunca com base numa leitura feita fora desta mesma
+   transação.
+3. Se satisfeito: grava a decisão (append-only), avança `AvatarRecord.status` e grava a
+   transição (append-only) com o `quality_gate` que autorizou — um único `commit`.
 
 Gates que dependem de GPU (`mesh`, `rig`, `materials`, `face`) checam a existência de um
 `DerivedAssetRecord` `GENERATED` do tipo certo — **nunca existe nesta missão**, então
@@ -132,8 +135,94 @@ ficam honestamente bloqueados (`blocked_reason="PENDENTE_RTX_4090"`). `voice`/`m
 `master` dependem de subsistemas (voice bank, motion bank) totalmente fora do escopo.
 `production` reconfirma que todos os outros 9 gates estão `pass`.
 
-`POST .../quality-gates/{gate}/reject` grava a decisão sem mudar o status do avatar —
-rejeição nunca regride nada, só documenta que a tentativa não foi aceita.
+`POST .../quality-gates/{gate}/reject` grava a decisão; se o gate rejeitado NÃO estava
+`pass`, o status do avatar não muda (só documenta que a tentativa não foi aceita). Se o
+gate ESTAVA `pass` (ex.: reabrir um multiview já aprovado), a rejeição invalida em
+cascata — ver "Evidência mutável" abaixo.
+
+## Concorrência real: locking, atomicidade e cascata (P1-6, P1-6b, P1-9)
+
+Toda decisão que muda `AvatarRecord.status` ou marca um gate `pass`/`fail` acontece numa
+única transação Postgres, nunca em leituras soltas seguidas de escrita separada:
+
+- `repository.approve_gate_atomic` / `reject_gate_atomic` / `review_reference_asset_atomic`
+  lockam a linha do avatar (`SELECT ... FOR UPDATE`) **primeiro, sempre** — essa é a ordem
+  universal de lock deste módulo (avatar antes de qualquer gate ou reference asset). Sem
+  uma ordem única, duas transações concorrentes podiam lockar os mesmos dois recursos em
+  ordem invertida uma da outra e formar um deadlock real (detectado e abortado pelo
+  Postgres, não uma corrupção silenciosa, mas ainda um erro evitável por construção). Só
+  depois do lock do avatar é que a lineage (identity lock aprovado) e a evidência do gate
+  são lidas, também com `FOR UPDATE` — a mesma transação que decide é a que enxergou a
+  evidência, não existe janela entre "achei que estava satisfeito" e "gravei que está
+  satisfeito" (P1-6).
+- Criar uma linha que ainda não existe (primeiro Identity Lock de uma versão, primeiro
+  `DerivedAsset`/`JobContract` de uma geração) não tem uma linha própria para lockar antes
+  dela existir — por isso essas funções também lockam o **avatar** primeiro; a UNIQUE
+  constraint do banco (migration `0006`) é a garantia de último recurso caso algum caminho
+  de código esqueça de lockar (P1-9). `IntegrityError` nessas funções é tratado como
+  "outra requisição venceu a corrida" (`IdentityLockConcurrentCreationError` ou
+  re-consulta silenciosa para `DerivedAsset`/`JobContract`), nunca um 500.
+
+### Evidência mutável depois de um gate PASS — decisão (opção B)
+
+Pergunta: se um reference asset que contou como evidência de um `MULTIVIEW` já `pass` for
+rejeitado DEPOIS (ex.: QA humana percebe um problema tarde), o que acontece com o gate?
+
+Duas opções foram consideradas: (A) tornar evidência imutável assim que usada por um gate
+`pass` (nunca mais permitir rejeitar um asset já "gasto"), ou (B) permitir a alteração e
+invalidar em cascata o gate e tudo que dependia dele.
+
+**Decisão: opção B.** Um reference asset malformado não deixa de ser um problema só porque
+um gate já passou por cima dele — travar a rejeição (opção A) obrigaria a QA humana a
+mentir sobre a qualidade da referência para conseguir documentá-la, ou inventar um
+mecanismo paralelo de "correção" fora do fluxo normal. B mantém uma única fonte de verdade
+(o estado dos reference assets) e deriva o estado dos gates dela sempre que muda, em vez
+de deixar duas fontes de verdade divergirem.
+
+Implementação: na MESMA transação que grava a rejeição (do asset, em
+`review_reference_asset_atomic`, ou do próprio gate, em `reject_gate_atomic`), se o gate
+afetado estava `pass`, os requisitos são reavaliados; se deixaram de estar satisfeitos, o
+gate cai para `fail`, todo gate `downstream` (ordem do pipeline, `enums.GATE_ORDER`) que
+estava `pass` também cai, e `AvatarRecord.status` regride para o predecessor do estágio
+invalidado (`enums.predecessor_status_of`) — nunca sobrevive um estado "gate caiu, avatar
+continua adiantado". Tudo fica registrado como transição append-only com o motivo
+prefixado `"invalidação em cascata: "`; nada é apagado, o histórico mostra exatamente o
+que aconteceu e por quê.
+
+### Version lineage: identity_version, capture_version, avatar_version_group (P1-5/7/8/9)
+
+Hoje as três "versões" do sistema **andam juntas, deliberadamente acopladas**:
+
+- `IdentityLockRecord.identity_version` — a geração de identidade aprovada (1, 2, 3...).
+- `ReferenceAssetRecord.capture_version` — a geração de captura em que aquela referência
+  foi enviada; sempre igual ao `identity_version` aprovado no momento do upload.
+- `QualityGateRecord.avatar_version_group`, `DerivedAssetRecord.avatar_version_group` e
+  `JobContractRecord.avatar_version_group` — a mesma geração, carimbada em cada gate/
+  derived asset/job contract.
+
+Ou seja: nesta V1, **uma nova Identity aprovada avança TODO o pipeline para uma nova
+geração de uma vez só** — multiview, mesh, materials etc. reiniciam juntos (P1-7: os
+gates da geração anterior voltam para `NOT_TESTED` e `AvatarRecord.status` volta para
+`DRAFT`), mesmo que só a identidade tenha mudado.
+
+**Isto é uma simplificação intencional da V1, não um descuido** — o prompt-mestre
+descreve um futuro onde `Identity v1` + `Multiview v2` podem coexistir (recapturar sem
+alterar a identidade da pessoa), o que exigiria uma versão de captura **independente** da
+versão de identidade, com sua própria lineage e seu próprio enforcement de "qual geração
+de multiview este gate está avaliando". Decompor isso agora exigiria uma coluna de versão
+própria por sub-pipeline (capture, mesh, materials, rig, face...), uma tabela de lineage
+por avatar explicitando qual combinação de versões está vigente simultaneamente, migração
+de dados, e reescrever `gate_requirements`/completeness para filtrar por versão própria de
+cada família — mudança grande o bastante para merecer sua própria missão, não um adendo a
+este hardening.
+
+Para não virar dívida silenciosa: os nomes dos campos já são genéricos por escolha
+(`avatar_version_group`, `capture_version` — nunca `identity_version_group`) exatamente
+para não precisarem ser renomeados no dia em que isso desacoplar, e o ponto de entrada
+único para "qual geração está vigente agora" é `dhf_avatar_factory.service.
+_current_version_group` (hoje só devolve `identity_version`) — qualquer decisão que
+precisar da lineage sempre passa por ali (ou pelo equivalente lockado dentro de cada
+transação atômica), nunca por um cálculo local duplicado.
 
 ## API
 

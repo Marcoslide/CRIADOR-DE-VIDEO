@@ -1,0 +1,28 @@
+[project]
+name = "dhf-gpu-engine"
+version = "0.1.0"
+description = "Digital Human Factory — GPU Orchestrator, VRAM/Model Manager, telemetria e CLI do nó RTX 4090"
+requires-python = ">=3.11"
+dependencies = [
+    "dhf-schemas",
+    "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+# Só necessário para quem for rodar os diagnostics/benchmarks de GPU de verdade — o
+# orchestrator/VRAM/model manager em si não precisa de torch instalado (shell out para
+# nvidia-smi via subprocess, nunca importa torch diretamente).
+gpu = ["torch>=2.11"]
+
+[tool.uv.sources]
+dhf-schemas = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dhf_gpu_engine"]
+
+[project.scripts]
+dhf-gpu = "dhf_gpu_engine.cli:main"
